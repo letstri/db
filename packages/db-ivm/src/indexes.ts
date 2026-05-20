@@ -33,9 +33,9 @@
  * Prefixes extracted from array values: `['prefix', 'suffix']` → prefix='prefix'
  */
 
-import { MultiSet } from "./multiset.js"
-import { hash } from "./hashing/index.js"
-import type { Hash } from "./hashing/index.js"
+import { MultiSet } from './multiset.js'
+import { hash } from './hashing/index.js'
+import type { Hash } from './hashing/index.js'
 
 // We use a symbol to represent the absence of a prefix, unprefixed values a stored
 // against this key.
@@ -150,9 +150,28 @@ export class Index<TKey, TValue, TPrefix = any> {
    *   hash to identify identical values, storing them in a third level value map.
    */
   #inner: IndexMap<TKey, TValue, TPrefix>
+  #consolidatedMultiplicity: Map<TKey, number> = new Map() // sum of multiplicities per key
 
   constructor() {
     this.#inner = new Map()
+  }
+
+  /**
+   * Create an Index from multiple MultiSet messages.
+   * @param messages - Array of MultiSet messages to build the index from.
+   * @returns A new Index containing all the data from the messages.
+   */
+  static fromMultiSets<K, V>(messages: Array<MultiSet<[K, V]>>): Index<K, V> {
+    const index = new Index<K, V>()
+
+    for (const message of messages) {
+      for (const [item, multiplicity] of message.getInner()) {
+        const [key, value] = item
+        index.addValue(key, [value, multiplicity])
+      }
+    }
+
+    return index
   }
 
   /**
@@ -164,7 +183,7 @@ export class Index<TKey, TValue, TPrefix = any> {
     return `Index(${JSON.stringify(
       [...this.entries()],
       undefined,
-      indent ? 2 : undefined
+      indent ? 2 : undefined,
     )})`
   }
 
@@ -182,6 +201,32 @@ export class Index<TKey, TValue, TPrefix = any> {
    */
   has(key: TKey): boolean {
     return this.#inner.has(key)
+  }
+
+  /**
+   * Check if a key has presence (non-zero consolidated multiplicity).
+   * @param key - The key to check.
+   * @returns True if the key has non-zero consolidated multiplicity, false otherwise.
+   */
+  hasPresence(key: TKey): boolean {
+    return (this.#consolidatedMultiplicity.get(key) || 0) !== 0
+  }
+
+  /**
+   * Get the consolidated multiplicity (sum of multiplicities) for a key.
+   * @param key - The key to get the consolidated multiplicity for.
+   * @returns The consolidated multiplicity for the key.
+   */
+  getConsolidatedMultiplicity(key: TKey): number {
+    return this.#consolidatedMultiplicity.get(key) || 0
+  }
+
+  /**
+   * Get all keys that have presence (non-zero consolidated multiplicity).
+   * @returns An iterator of keys with non-zero consolidated multiplicity.
+   */
+  getPresenceKeys(): Iterable<TKey> {
+    return this.#consolidatedMultiplicity.keys()
   }
 
   /**
@@ -257,6 +302,15 @@ export class Index<TKey, TValue, TPrefix = any> {
     // If the multiplicity is 0, do nothing
     if (multiplicity === 0) return
 
+    // Update consolidated multiplicity tracking
+    const newConsolidatedMultiplicity =
+      (this.#consolidatedMultiplicity.get(key) || 0) + multiplicity
+    if (newConsolidatedMultiplicity === 0) {
+      this.#consolidatedMultiplicity.delete(key)
+    } else {
+      this.#consolidatedMultiplicity.set(key, newConsolidatedMultiplicity)
+    }
+
     const mapOrSingleValue = this.#inner.get(key)
 
     if (mapOrSingleValue === undefined) {
@@ -271,7 +325,7 @@ export class Index<TKey, TValue, TPrefix = any> {
         key,
         mapOrSingleValue,
         value,
-        multiplicity
+        multiplicity,
       )
       return
     }
@@ -308,7 +362,7 @@ export class Index<TKey, TValue, TPrefix = any> {
     key: TKey,
     currentSingleValue: SingleValue<TValue>,
     newValue: TValue,
-    multiplicity: number
+    multiplicity: number,
   ) {
     const [currentValue, currentMultiplicity] = currentSingleValue
 
@@ -384,7 +438,7 @@ export class Index<TKey, TValue, TPrefix = any> {
    * @returns A multiset of the joined values.
    */
   join<TValue2>(
-    other: Index<TKey, TValue2>
+    other: Index<TKey, TValue2>,
   ): MultiSet<[TKey, [TValue, TValue2]]> {
     const result: Array<[[TKey, [TValue, TValue2]], number]> = []
     // We want to iterate over the smaller of the two indexes to reduce the
@@ -445,7 +499,7 @@ function getPrefix<TValue, TPrefix>(value: TValue): TPrefix | NO_PREFIX {
  * @returns True if the value is a single value, false otherwise.
  */
 function isSingleValue<TValue>(
-  value: SingleValue<TValue> | unknown
+  value: SingleValue<TValue> | unknown,
 ): value is SingleValue<TValue> {
   return Array.isArray(value)
 }

@@ -1,8 +1,43 @@
-import type { IStreamBuilder } from "@tanstack/db-ivm"
-import type { Collection } from "./collection/index.js"
-import type { StandardSchemaV1 } from "@standard-schema/spec"
-import type { Transaction } from "./transactions"
-import type { BasicExpression, OrderBy } from "./query/ir.js"
+import type { IStreamBuilder } from '@tanstack/db-ivm'
+import type { Collection } from './collection/index.js'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
+import type { Transaction } from './transactions'
+import type { BasicExpression, OrderBy } from './query/ir.js'
+import type { EventEmitter } from './event-emitter.js'
+import type { IndexConstructor } from './indexes/base-index.js'
+import type { SingleRowRefProxy } from './query/builder/ref-proxy.js'
+import type { WithVirtualProps } from './virtual-props.js'
+
+/**
+ * Interface for a collection-like object that provides the necessary methods
+ * for the change events system to work
+ */
+export interface CollectionLike<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+> extends Pick<
+  Collection<T, TKey>,
+  `get` | `has` | `entries` | `indexes` | `id` | `compareOptions`
+> {}
+
+/**
+ * StringSortOpts - Options for string sorting behavior
+ *
+ * This discriminated union allows for two types of string sorting:
+ * - **Lexical**: Simple character-by-character comparison (default)
+ * - **Locale**: Locale-aware sorting with optional customization
+ *
+ * The union ensures that locale options are only available when locale sorting is selected.
+ */
+export type StringCollationConfig =
+  | {
+      stringSort?: `lexical`
+    }
+  | {
+      stringSort?: `locale`
+      locale?: string
+      localeOptions?: object
+    }
 
 /**
  * Helper type to extract the output type from a standard schema
@@ -34,9 +69,9 @@ export type TransactionState = `pending` | `persisting` | `completed` | `failed`
 export type Fn = (...args: Array<any>) => any
 
 /**
- * A record of utility functions that can be attached to a collection
+ * A record of utilities (functions or getters) that can be attached to a collection
  */
-export type UtilsRecord = Record<string, Fn>
+export type UtilsRecord = Record<string, any>
 
 /**
  *
@@ -92,7 +127,7 @@ export type MutationFnParams<T extends object = Record<string, unknown>> = {
 }
 
 export type MutationFn<T extends object = Record<string, unknown>> = (
-  params: MutationFnParams<T>
+  params: MutationFnParams<T>,
 ) => Promise<any>
 
 /**
@@ -107,7 +142,26 @@ export type NonEmptyArray<T> = [T, ...Array<T>]
 export type TransactionWithMutations<
   T extends object = Record<string, unknown>,
   TOperation extends OperationType = OperationType,
-> = Transaction<T> & {
+> = Omit<Transaction<T>, `mutations`> & {
+  /**
+   * We must omit the `mutations` property from `Transaction<T>` before intersecting
+   * because TypeScript intersects property types when the same property appears on
+   * both sides of an intersection.
+   *
+   * Without `Omit`:
+   * - `Transaction<T>` has `mutations: Array<PendingMutation<T>>`
+   * - The intersection would create: `Array<PendingMutation<T>> & NonEmptyArray<PendingMutation<T, TOperation>>`
+   * - When mapping over this array, TypeScript widens `TOperation` from the specific literal
+   *   (e.g., `"delete"`) to the union `OperationType` (`"insert" | "update" | "delete"`)
+   * - This causes `PendingMutation<T, OperationType>` to evaluate the conditional type
+   *   `original: TOperation extends 'insert' ? {} : T` as `{} | T` instead of just `T`
+   *
+   * With `Omit`:
+   * - We remove `mutations` from `Transaction<T>` first
+   * - Then add back `mutations: NonEmptyArray<PendingMutation<T, TOperation>>`
+   * - TypeScript can properly narrow `TOperation` to the specific literal type
+   * - This ensures `mutation.original` is correctly typed as `T` (not `{} | T`) when mapping
+   */
   mutations: NonEmptyArray<PendingMutation<T, TOperation>>
 }
 
@@ -150,18 +204,144 @@ export type Row<TExtensions = never> = Record<string, Value<TExtensions>>
 
 export type OperationType = `insert` | `update` | `delete`
 
+/**
+ * Subscription status values
+ */
+export type SubscriptionStatus = `ready` | `loadingSubset`
+
+/**
+ * Event emitted when subscription status changes
+ */
+export interface SubscriptionStatusChangeEvent {
+  type: `status:change`
+  subscription: Subscription
+  previousStatus: SubscriptionStatus
+  status: SubscriptionStatus
+}
+
+/**
+ * Event emitted when subscription status changes to a specific status
+ */
+export interface SubscriptionStatusEvent<T extends SubscriptionStatus> {
+  type: `status:${T}`
+  subscription: Subscription
+  previousStatus: SubscriptionStatus
+  status: T
+}
+
+/**
+ * Event emitted when subscription is unsubscribed
+ */
+export interface SubscriptionUnsubscribedEvent {
+  type: `unsubscribed`
+  subscription: Subscription
+}
+
+/**
+ * All subscription events
+ */
+export type SubscriptionEvents = {
+  'status:change': SubscriptionStatusChangeEvent
+  'status:ready': SubscriptionStatusEvent<`ready`>
+  'status:loadingSubset': SubscriptionStatusEvent<`loadingSubset`>
+  unsubscribed: SubscriptionUnsubscribedEvent
+}
+
+/**
+ * Public interface for a collection subscription
+ * Used by sync implementations to track subscription lifecycle
+ */
+export interface Subscription extends EventEmitter<SubscriptionEvents> {
+  /** Current status of the subscription */
+  readonly status: SubscriptionStatus
+}
+
+/**
+ * Cursor expressions for pagination, passed separately from the main `where` clause.
+ * The sync layer can choose to use cursor-based pagination (combining these with the where)
+ * or offset-based pagination (ignoring these and using the `offset` parameter).
+ *
+ * Neither expression includes the main `where` clause - they are cursor-specific only.
+ */
+export type CursorExpressions = {
+  /**
+   * Expression for rows greater than (after) the cursor value.
+   * For multi-column orderBy, this is a composite cursor using OR of conditions.
+   * Example for [col1 ASC, col2 DESC] with values [v1, v2]:
+   *   or(gt(col1, v1), and(eq(col1, v1), lt(col2, v2)))
+   */
+  whereFrom: BasicExpression<boolean>
+  /**
+   * Expression for rows equal to the current cursor value (first orderBy column only).
+   * Used to handle tie-breaking/duplicates at the boundary.
+   * Example: eq(col1, v1) or for Dates: and(gte(col1, v1), lt(col1, v1+1ms))
+   */
+  whereCurrent: BasicExpression<boolean>
+  /**
+   * The key of the last item that was loaded.
+   * Can be used by sync layers for tracking or deduplication.
+   */
+  lastKey?: string | number
+}
+
+export type LoadSubsetOptions = {
+  /** The where expression to filter the data (does NOT include cursor expressions) */
+  where?: BasicExpression<boolean>
+  /** The order by clause to sort the data */
+  orderBy?: OrderBy
+  /** The limit of the data to load */
+  limit?: number
+  /**
+   * Cursor expressions for cursor-based pagination.
+   * These are separate from `where` - the sync layer should combine them if using cursor-based pagination.
+   * Neither expression includes the main `where` clause.
+   */
+  cursor?: CursorExpressions
+  /**
+   * Row offset for offset-based pagination.
+   * The sync layer can use this instead of `cursor` if it prefers offset-based pagination.
+   */
+  offset?: number
+  /**
+   * The subscription that triggered the load.
+   * Advanced sync implementations can use this for:
+   * - LRU caching keyed by subscription
+   * - Reference counting to track active subscriptions
+   * - Subscribing to subscription events (e.g., finalization/unsubscribe)
+   * @optional Available when called from CollectionSubscription, may be undefined for direct calls
+   */
+  subscription?: Subscription
+}
+
+export type LoadSubsetFn = (options: LoadSubsetOptions) => true | Promise<void>
+
+export type UnloadSubsetFn = (options: LoadSubsetOptions) => void
+
+export type CleanupFn = () => void
+
+export type SyncConfigRes = {
+  cleanup?: CleanupFn
+  loadSubset?: LoadSubsetFn
+  unloadSubset?: UnloadSubsetFn
+}
 export interface SyncConfig<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
 > {
   sync: (params: {
     collection: Collection<T, TKey, any, any, any>
-    begin: () => void
-    write: (message: Omit<ChangeMessage<T>, `key`>) => void
+    /**
+     * Begin a new sync transaction.
+     * @param options.immediate - When true, the transaction will be processed immediately
+     *   even if there are persisting user transactions. Used by manual write operations.
+     */
+    begin: (options?: { immediate?: boolean }) => void
+    write: (message: ChangeMessageOrDeleteKeyMessage<T, TKey>) => void
     commit: () => void
     markReady: () => void
     truncate: () => void
-  }) => void
+    metadata?: SyncMetadataApi<TKey>
+  }) => void | CleanupFn | SyncConfigRes
 
   /**
    * Get the sync metadata for insert operations
@@ -179,6 +359,25 @@ export interface SyncConfig<
   rowUpdateMode?: `partial` | `full`
 }
 
+export interface SyncMetadataApi<
+  TKey extends string | number = string | number,
+> {
+  row: {
+    get: (key: TKey) => unknown | undefined
+    set: (key: TKey, metadata: unknown) => void
+    delete: (key: TKey) => void
+  }
+  collection: {
+    get: (key: string) => unknown | undefined
+    set: (key: string, value: unknown) => void
+    delete: (key: string) => void
+    list: (prefix?: string) => ReadonlyArray<{
+      key: string
+      value: unknown
+    }>
+  }
+}
+
 export interface ChangeMessage<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
@@ -190,19 +389,35 @@ export interface ChangeMessage<
   metadata?: Record<string, unknown>
 }
 
-export interface OptimisticChangeMessage<
+export type DeleteKeyMessage<TKey extends string | number = string | number> =
+  Omit<ChangeMessage<any, TKey>, `value` | `previousValue` | `type`> & {
+    type: `delete`
+  }
+
+export type ChangeMessageOrDeleteKeyMessage<
   T extends object = Record<string, unknown>,
-> extends ChangeMessage<T> {
-  // Is this change message part of an active transaction. Only applies to optimistic changes.
-  isActive?: boolean
-}
+  TKey extends string | number = string | number,
+> = Omit<ChangeMessage<T>, `key`> | DeleteKeyMessage<TKey>
+
+export type OptimisticChangeMessage<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+> =
+  | (ChangeMessage<T> & {
+      // Is this change message part of an active transaction. Only applies to optimistic changes.
+      isActive?: boolean
+    })
+  | (DeleteKeyMessage<TKey> & {
+      // Is this change message part of an active transaction. Only applies to optimistic changes.
+      isActive?: boolean
+    })
 
 /**
  * The Standard Schema interface.
  * This follows the standard-schema specification: https://github.com/standard-schema/standard-schema
  */
 export type StandardSchema<T> = StandardSchemaV1 & {
-  "~standard": {
+  '~standard': {
     types?: {
       input: T
       output: T
@@ -230,7 +445,7 @@ export interface InsertConfig {
 export type UpdateMutationFnParams<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
 > = {
   transaction: TransactionWithMutations<T, `update`>
   collection: Collection<T, TKey, TUtils>
@@ -239,7 +454,7 @@ export type UpdateMutationFnParams<
 export type InsertMutationFnParams<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
 > = {
   transaction: TransactionWithMutations<T, `insert`>
   collection: Collection<T, TKey, TUtils>
@@ -247,7 +462,7 @@ export type InsertMutationFnParams<
 export type DeleteMutationFnParams<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
 > = {
   transaction: TransactionWithMutations<T, `delete`>
   collection: Collection<T, TKey, TUtils>
@@ -256,21 +471,21 @@ export type DeleteMutationFnParams<
 export type InsertMutationFn<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
   TReturn = any,
 > = (params: InsertMutationFnParams<T, TKey, TUtils>) => Promise<TReturn>
 
 export type UpdateMutationFn<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
   TReturn = any,
 > = (params: UpdateMutationFnParams<T, TKey, TUtils>) => Promise<TReturn>
 
 export type DeleteMutationFn<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
   TReturn = any,
 > = (params: DeleteMutationFnParams<T, TKey, TUtils>) => Promise<TReturn>
 
@@ -286,22 +501,22 @@ export type DeleteMutationFn<
  *
  * @example
  * // Status transitions
- * // idle → loading → initialCommit → ready
+ * // idle → loading → ready (when markReady() is called)
  * // Any status can transition to → error or cleaned-up
  */
 export type CollectionStatus =
   /** Collection is created but sync hasn't started yet (when startSync config is false) */
   | `idle`
-  /** Sync has started but hasn't received the first commit yet */
+  /** Sync has started and is loading data */
   | `loading`
-  /** Collection is in the process of committing its first transaction */
-  | `initialCommit`
-  /** Collection has received at least one commit and is ready for use */
+  /** Collection has been explicitly marked ready via markReady() */
   | `ready`
   /** An error occurred during sync initialization */
   | `error`
   /** Collection has been cleaned up and resources freed */
   | `cleaned-up`
+
+export type SyncMode = `eager` | `on-demand`
 
 export interface BaseCollectionConfig<
   T extends object = Record<string, unknown>,
@@ -311,7 +526,7 @@ export interface BaseCollectionConfig<
   // then it would conflict with the overloads of createCollection which
   // requires either T to be provided or a schema to be provided but not both!
   TSchema extends StandardSchemaV1 = never,
-  TUtils extends UtilsRecord = Record<string, Fn>,
+  TUtils extends UtilsRecord = UtilsRecord,
   TReturn = any,
 > {
   // If an id isn't passed in, a UUID will be
@@ -347,12 +562,27 @@ export interface BaseCollectionConfig<
   /**
    * Auto-indexing mode for the collection.
    * When enabled, indexes will be automatically created for simple where expressions.
-   * @default "eager"
+   * @default "off"
    * @description
-   * - "off": No automatic indexing
-   * - "eager": Automatically create indexes for simple where expressions in subscribeChanges (default)
+   * - "off": No automatic indexing (default). Use explicit indexes for better bundle size.
+   * - "eager": Automatically create indexes for simple where expressions in subscribeChanges.
+   *            Requires setting defaultIndexType.
    */
   autoIndex?: `off` | `eager`
+  /**
+   * Default index type to use when creating indexes without an explicit type.
+   * Required for auto-indexing. Import from '@tanstack/db'.
+   * @example
+   * ```ts
+   * import { BasicIndex } from '@tanstack/db'
+   * const collection = createCollection({
+   *   defaultIndexType: BasicIndex,
+   *   autoIndex: 'eager',
+   *   // ...
+   * })
+   * ```
+   */
+  defaultIndexType?: IndexConstructor<TKey>
   /**
    * Optional function to compare two items.
    * This is used to order the items in the collection.
@@ -364,6 +594,15 @@ export interface BaseCollectionConfig<
    * compare: (x, y) => x.createdAt.getTime() - y.createdAt.getTime()
    */
   compare?: (x: T, y: T) => number
+  /**
+   * The mode of sync to use for the collection.
+   * @default `eager`
+   * @description
+   * - `eager`: syncs all data immediately on preload
+   * - `on-demand`: syncs data in incremental snapshots when the collection is queried
+   * The exact implementation of the sync mode is up to the sync implementation.
+   */
+  syncMode?: SyncMode
   /**
    * Optional asynchronous handler function called before an insert operation
    * @param params Object containing transaction and collection information
@@ -493,19 +732,54 @@ export interface BaseCollectionConfig<
    * }
    */
   onDelete?: DeleteMutationFn<T, TKey, TUtils, TReturn>
+
+  /**
+   * Specifies how to compare data in the collection.
+   * This should be configured to match data ordering on the backend.
+   * E.g., when using the Electric DB collection these options
+   *       should match the database's collation settings.
+   */
+  defaultStringCollation?: StringCollationConfig
+
+  utils?: TUtils
 }
 
 export interface CollectionConfig<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
   TSchema extends StandardSchemaV1 = never,
-> extends BaseCollectionConfig<T, TKey, TSchema> {
+  TUtils extends UtilsRecord = UtilsRecord,
+> extends BaseCollectionConfig<T, TKey, TSchema, TUtils> {
   sync: SyncConfig<T, TKey>
 }
 
-export type ChangesPayload<T extends object = Record<string, unknown>> = Array<
-  ChangeMessage<T>
->
+export type SingleResult = {
+  singleResult: true
+}
+
+export type NonSingleResult = {
+  singleResult?: never
+}
+
+export type MaybeSingleResult = {
+  /**
+   * If enabled the collection will return a single object instead of an array
+   */
+  singleResult?: true
+}
+
+// Only used for live query collections
+export type CollectionConfigSingleRowOption<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+  TSchema extends StandardSchemaV1 = never,
+  TUtils extends UtilsRecord = {},
+> = CollectionConfig<T, TKey, TSchema, TUtils> & MaybeSingleResult
+
+export type ChangesPayload<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+> = Array<ChangeMessage<WithVirtualProps<T, TKey>, TKey>>
 
 /**
  * An input row from a collection
@@ -545,15 +819,57 @@ export type NamespacedAndKeyedStream = IStreamBuilder<KeyedNamespacedRow>
 /**
  * Options for subscribing to collection changes
  */
-export interface SubscribeChangesOptions {
+export interface SubscribeChangesOptions<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+> {
   /** Whether to include the current state as initial changes */
   includeInitialState?: boolean
+  /**
+   * Callback function for filtering changes using a row proxy.
+   * The callback receives a proxy object that records property access,
+   * allowing you to use query builder functions like `eq`, `gt`, etc.
+   *
+   * @example
+   * ```ts
+   * import { eq } from "@tanstack/db"
+   *
+   * collection.subscribeChanges(callback, {
+   *   where: (row) => eq(row.status, "active")
+   * })
+   * ```
+   */
+  where?: (row: SingleRowRefProxy<WithVirtualProps<T, TKey>>) => any
   /** Pre-compiled expression for filtering changes */
   whereExpression?: BasicExpression<boolean>
+  /**
+   * Listener for subscription status changes.
+   * Registered BEFORE any snapshot is requested, ensuring no status transitions are missed.
+   * @internal
+   */
+  onStatusChange?: (event: SubscriptionStatusChangeEvent) => void
+  /**
+   * Optional orderBy to include in loadSubset for query-specific cache keys.
+   * @internal
+   */
+  orderBy?: OrderBy
+  /**
+   * Optional limit to include in loadSubset for query-specific cache keys.
+   * @internal
+   */
+  limit?: number
+  /**
+   * Callback that receives the loadSubset result (Promise or true) from requestSnapshot.
+   * Allows the caller to directly track the loading promise for isReady status.
+   * @internal
+   */
+  onLoadSubsetResult?: (result: Promise<void> | true) => void
 }
 
-export interface SubscribeChangesSnapshotOptions
-  extends Omit<SubscribeChangesOptions, `includeInitialState`> {
+export interface SubscribeChangesSnapshotOptions<
+  T extends object = Record<string, unknown>,
+  TKey extends string | number = string | number,
+> extends Omit<SubscribeChangesOptions<T, TKey>, `includeInitialState`> {
   orderBy?: OrderBy
   limit?: number
 }
@@ -603,7 +919,7 @@ export interface CurrentStateAsChangesOptions {
 export type ChangeListener<
   T extends object = Record<string, unknown>,
   TKey extends string | number = string | number,
-> = (changes: Array<ChangeMessage<T, TKey>>) => void
+> = (changes: Array<ChangeMessage<WithVirtualProps<T, TKey>, TKey>>) => void
 
 // Adapted from https://github.com/sindresorhus/type-fest
 // MIT License Copyright (c) Sindre Sorhus
@@ -678,3 +994,6 @@ export type WritableDeep<T> = T extends BuiltIns
           : T extends object
             ? WritableObjectDeep<T>
             : unknown
+
+export type MakeOptional<T, K extends keyof T> = Omit<T, K> &
+  Partial<Pick<T, K>>

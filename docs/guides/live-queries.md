@@ -29,18 +29,34 @@ const activeUsers = createCollection(liveQueryCollectionOptions({
 
 The result types are automatically inferred from your query structure, providing full TypeScript support. When you use a `select` clause, the result type matches your projection. Without `select`, you get the full schema with proper join optionality.
 
+## Virtual properties
+
+Live query results include computed, read-only virtual properties on every row:
+
+- `$synced`: `true` when the row is confirmed by sync; `false` when it is still optimistic.
+- `$origin`: `"local"` if the last confirmed change came from this client, otherwise `"remote"`.
+- `$key`: the row key for the result.
+- `$collectionId`: the source collection ID.
+
+These props can be used in `where`, `select`, and `orderBy` clauses. They are added to
+query outputs automatically and should not be persisted back to storage.
+
 ## Table of Contents
 
 - [Creating Live Query Collections](#creating-live-query-collections)
+- [One-shot Queries with queryOnce](#one-shot-queries-with-queryonce)
 - [From Clause](#from-clause)
 - [Where Clauses](#where-clauses)
 - [Select Projections](#select)
 - [Joins](#joins)
 - [Subqueries](#subqueries)
+- [Includes](#includes)
 - [groupBy and Aggregations](#groupby-and-aggregations)
+- [findOne](#findone)
 - [Distinct](#distinct)
 - [Order By, Limit, and Offset](#order-by-limit-and-offset)
 - [Composable Queries](#composable-queries)
+- [Reactive Effects (createEffect)](#reactive-effects-createeffect)
 - [Expression Functions Reference](#expression-functions-reference)
 - [Functional Variants](#functional-variants)
 
@@ -113,6 +129,36 @@ const activeUsers = createLiveQueryCollection((q) =>
 )
 ```
 
+## One-shot Queries with queryOnce
+
+If you need a one-time snapshot (no ongoing reactivity), use `queryOnce`. It
+creates a live query collection, preloads it, extracts the results, and cleans
+up automatically so you do not have to remember to call `cleanup()`.
+
+```ts
+import { eq, queryOnce } from '@tanstack/db'
+
+// Basic one-shot query
+const activeUsers = await queryOnce((q) =>
+  q
+    .from({ user: usersCollection })
+    .where(({ user }) => eq(user.active, true))
+    .select(({ user }) => ({ id: user.id, name: user.name }))
+)
+
+// Single result with findOne()
+const user = await queryOnce((q) =>
+  q
+    .from({ user: usersCollection })
+    .where(({ user }) => eq(user.id, userId))
+    .findOne()
+)
+```
+
+Use `queryOnce` for scripts, background tasks, data export, or AI/LLM context
+building. `findOne()` resolves to `undefined` when no rows match. For UI
+bindings and reactive updates, use live queries instead.
+
 ### Using with Frameworks
 
 In React, you can use the `useLiveQuery` hook:
@@ -160,7 +206,280 @@ export class UserListComponent {
 }
 ```
 
-For more details on framework integration, see the [React](../../framework/react/adapter), [Vue](../../framework/vue/adapter), and [Angular](../../framework/angular/adapter) adapter documentation.
+> **Note:** React hooks (`useLiveQuery`, `useLiveInfiniteQuery`, `useLiveSuspenseQuery`) accept an optional dependency array parameter to re-execute queries when values change, similar to React's `useEffect`. See the [React Adapter documentation](../framework/react/overview#dependency-arrays) for details on when and how to use dependency arrays.
+
+For more details on framework integration, see the [React](../framework/react/overview), [Vue](../framework/vue/overview), and [Angular](../framework/angular/overview) adapter documentation.
+
+### Using with React Suspense
+
+For React applications, you can use the `useLiveSuspenseQuery` hook to integrate with React Suspense boundaries. This hook suspends rendering while data loads initially, then streams updates without re-suspending.
+
+```tsx
+import { useLiveSuspenseQuery } from '@tanstack/react-db'
+import { Suspense } from 'react'
+
+function UserList() {
+  // This will suspend until data is ready
+  const { data } = useLiveSuspenseQuery((q) =>
+    q
+      .from({ user: usersCollection })
+      .where(({ user }) => eq(user.active, true))
+  )
+
+  // data is always defined - no need for optional chaining
+  return (
+    <ul>
+      {data.map(user => (
+        <li key={user.id}>{user.name}</li>
+      ))}
+    </ul>
+  )
+}
+
+function App() {
+  return (
+    <Suspense fallback={<div>Loading users...</div>}>
+      <UserList />
+    </Suspense>
+  )
+}
+```
+
+#### Type Safety
+
+The key difference from `useLiveQuery` is that `data` is always defined (never `undefined`). The hook suspends during initial load, so by the time your component renders, data is guaranteed to be available:
+
+```tsx
+function UserStats() {
+  const { data } = useLiveSuspenseQuery((q) =>
+    q.from({ user: usersCollection })
+  )
+
+  // TypeScript knows data is Array<User>, not Array<User> | undefined
+  return <div>Total users: {data.length}</div>
+}
+```
+
+#### Error Handling
+
+Combine with Error Boundaries to handle loading errors:
+
+```tsx
+import { ErrorBoundary } from 'react-error-boundary'
+
+function App() {
+  return (
+    <ErrorBoundary fallback={<div>Failed to load users</div>}>
+      <Suspense fallback={<div>Loading users...</div>}>
+        <UserList />
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+```
+
+#### Reactive Updates
+
+After the initial load, data updates stream in without re-suspending:
+
+```tsx
+function UserList() {
+  const { data } = useLiveSuspenseQuery((q) =>
+    q.from({ user: usersCollection })
+  )
+
+  // Suspends once during initial load
+  // After that, data updates automatically when users change
+  // UI never re-suspends for live updates
+  return (
+    <ul>
+      {data.map(user => (
+        <li key={user.id}>{user.name}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+#### Re-suspending on Dependency Changes
+
+When dependencies change, the hook re-suspends to load new data:
+
+```tsx
+function FilteredUsers({ minAge }: { minAge: number }) {
+  const { data } = useLiveSuspenseQuery(
+    (q) =>
+      q
+        .from({ user: usersCollection })
+        .where(({ user }) => gt(user.age, minAge)),
+    [minAge] // Re-suspend when minAge changes
+  )
+
+  return (
+    <ul>
+      {data.map(user => (
+        <li key={user.id}>{user.name} - {user.age}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+#### When to Use Which Hook
+
+- **Use `useLiveSuspenseQuery`** when:
+  - You want to use React Suspense for loading states
+  - You prefer handling loading/error states with `<Suspense>` and `<ErrorBoundary>` components
+  - You want guaranteed non-undefined data types
+  - The query always needs to run (not conditional)
+
+- **Use `useLiveQuery`** when:
+  - You need conditional/disabled queries
+  - You prefer handling loading/error states within your component
+  - You want to show loading states inline without Suspense
+  - You need access to `status` and `isLoading` flags
+  - **You're using a router with loaders** (React Router, TanStack Router, etc.) - preload in the loader and use `useLiveQuery` in the component
+
+```tsx
+// useLiveQuery - handle states in component
+function UserList() {
+  const { data, status, isLoading } = useLiveQuery((q) =>
+    q.from({ user: usersCollection })
+  )
+
+  if (isLoading) return <div>Loading...</div>
+  if (status === 'error') return <div>Error loading users</div>
+
+  return <ul>{data?.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+}
+
+// useLiveSuspenseQuery - handle states with Suspense/ErrorBoundary
+function UserList() {
+  const { data } = useLiveSuspenseQuery((q) =>
+    q.from({ user: usersCollection })
+  )
+
+  return <ul>{data.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+}
+
+// useLiveQuery with router loader - recommended pattern
+// In your route configuration:
+const route = {
+  path: '/users',
+  loader: async () => {
+    // Preload the collection in the loader
+    await usersCollection.preload()
+    return null
+  },
+  component: UserList,
+}
+
+// In your component:
+function UserList() {
+  // Collection is already loaded, so data is immediately available
+  const { data } = useLiveQuery((q) =>
+    q.from({ user: usersCollection })
+  )
+
+  return <ul>{data?.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+}
+```
+
+### Conditional Queries
+
+In React, you can conditionally disable a query by returning `undefined` or `null` from the `useLiveQuery` callback. When disabled, the hook returns a special state indicating the query is not active.
+
+```tsx
+import { useLiveQuery } from '@tanstack/react-db'
+
+function TodoList({ userId }: { userId?: string }) {
+  const { data, isEnabled, status } = useLiveQuery((q) => {
+    // Disable the query when userId is not available
+    if (!userId) return undefined
+
+    return q
+      .from({ todos: todosCollection })
+      .where(({ todos }) => eq(todos.userId, userId))
+  }, [userId])
+
+  if (!isEnabled) {
+    return <div>Please select a user</div>
+  }
+
+  return (
+    <ul>
+      {data?.map(todo => (
+        <li key={todo.id}>{todo.text}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+When the query is disabled (callback returns `undefined` or `null`):
+- `status` is `'disabled'`
+- `data`, `state`, and `collection` are `undefined`
+- `isEnabled` is `false`
+- `isLoading`, `isReady`, `isIdle`, and `isError` are all `false`
+
+This pattern is useful for "wait until inputs exist" flows without needing to conditionally render the hook itself or manage an external enabled flag.
+
+### Alternative Callback Return Types
+
+The `useLiveQuery` callback can return different types depending on your use case:
+
+#### Returning a Query Builder (Standard)
+
+The most common pattern is to return a query builder:
+
+```tsx
+const { data } = useLiveQuery((q) =>
+  q.from({ todos: todosCollection })
+   .where(({ todos }) => eq(todos.completed, false))
+)
+```
+
+#### Returning a Pre-created Collection
+
+You can return an existing collection directly:
+
+```tsx
+const activeUsersCollection = createLiveQueryCollection((q) =>
+  q.from({ users: usersCollection })
+   .where(({ users }) => eq(users.active, true))
+)
+
+function UserList({ usePrebuilt }: { usePrebuilt: boolean }) {
+  const { data } = useLiveQuery((q) => {
+    // Toggle between pre-created collection and ad-hoc query
+    if (usePrebuilt) return activeUsersCollection
+
+    return q.from({ users: usersCollection })
+  }, [usePrebuilt])
+
+  return <ul>{data?.map(user => <li key={user.id}>{user.name}</li>)}</ul>
+}
+```
+
+#### Returning a LiveQueryCollectionConfig
+
+You can return a configuration object to specify additional options like a custom ID:
+
+```tsx
+const { data } = useLiveQuery((q) => {
+  return {
+    query: q.from({ items: itemsCollection })
+             .select(({ items }) => ({ id: items.id })),
+    id: 'items-view', // Custom ID for debugging
+    gcTime: 10000 // Custom garbage collection time
+  }
+})
+```
+
+This is particularly useful when you need to:
+- Attach a stable ID for debugging or logging
+- Configure collection-specific options like `gcTime` or `getKey`
+- Conditionally switch between different collection configurations
 
 ## From Clause
 
@@ -442,9 +761,8 @@ A `join` without a `select` will return row objects that are namespaced with the
 
 The result type of a join will take into account the join type, with the optionality of the joined fields being determined by the join type.
 
-> [!NOTE]
-> We are working on an `include` system that will enable joins that project to a hierarchical object. For example an `issue` row could have a `comments` property that is an array of `comment` rows.
-> See [this issue](https://github.com/TanStack/db/issues/288) for more details.
+> [!TIP]
+> If you need hierarchical results instead of flat joined rows (e.g., each project with its nested issues), see [Includes](#includes) below.
 
 ### Method Signature
 
@@ -735,6 +1053,223 @@ const topUsers = createCollection(liveQueryCollectionOptions({
 }))
 ```
 
+## Includes
+
+Includes let you nest subqueries inside `.select()` to produce hierarchical results. Instead of joins that flatten 1:N relationships into repeated rows, each parent row gets a nested collection of its related items.
+
+```ts
+import { createLiveQueryCollection, eq } from '@tanstack/db'
+
+const projectsWithIssues = createLiveQueryCollection((q) =>
+  q.from({ p: projectsCollection }).select(({ p }) => ({
+    id: p.id,
+    name: p.name,
+    issues: q
+      .from({ i: issuesCollection })
+      .where(({ i }) => eq(i.projectId, p.id))
+      .select(({ i }) => ({
+        id: i.id,
+        title: i.title,
+      })),
+  })),
+)
+```
+
+Each project's `issues` field is a live `Collection` that updates incrementally as the underlying data changes.
+
+### Correlation Condition
+
+The child query's `.where()` must contain an `eq()` that links a child field to a parent field — this is the **correlation condition**. It tells the system how children relate to parents.
+
+```ts
+// The correlation condition: links issues to their parent project
+.where(({ i }) => eq(i.projectId, p.id))
+```
+
+The correlation condition can appear as a standalone `.where()`, or inside an `and()`:
+
+```ts
+// Also valid — correlation is extracted from inside and()
+.where(({ i }) => and(eq(i.projectId, p.id), eq(i.status, 'open')))
+```
+
+The correlation field does not need to be included in the parent's `.select()`.
+
+### Additional Filters
+
+Child queries support additional `.where()` clauses beyond the correlation condition, including filters that reference parent fields:
+
+```ts
+q.from({ p: projectsCollection }).select(({ p }) => ({
+  id: p.id,
+  name: p.name,
+  issues: q
+    .from({ i: issuesCollection })
+    .where(({ i }) => eq(i.projectId, p.id))       // correlation
+    .where(({ i }) => eq(i.createdBy, p.createdBy)) // parent-referencing filter
+    .where(({ i }) => eq(i.status, 'open'))          // pure child filter
+    .select(({ i }) => ({
+      id: i.id,
+      title: i.title,
+    })),
+}))
+```
+
+Parent-referencing filters are fully reactive — if a parent's field changes, the child results update automatically.
+
+### Ordering and Limiting
+
+Child queries support `.orderBy()` and `.limit()`, applied per parent:
+
+```ts
+q.from({ p: projectsCollection }).select(({ p }) => ({
+  id: p.id,
+  name: p.name,
+  issues: q
+    .from({ i: issuesCollection })
+    .where(({ i }) => eq(i.projectId, p.id))
+    .orderBy(({ i }) => i.createdAt, 'desc')
+    .limit(5)
+    .select(({ i }) => ({
+      id: i.id,
+      title: i.title,
+    })),
+}))
+```
+
+Each project gets its own top-5 issues, not 5 issues shared across all projects.
+
+### toArray
+
+By default, each child result is a live `Collection`. If you want a plain array instead, wrap the child query with `toArray()`:
+
+```ts
+import { createLiveQueryCollection, eq, toArray } from '@tanstack/db'
+
+const projectsWithIssues = createLiveQueryCollection((q) =>
+  q.from({ p: projectsCollection }).select(({ p }) => ({
+    id: p.id,
+    name: p.name,
+    issues: toArray(
+      q
+        .from({ i: issuesCollection })
+        .where(({ i }) => eq(i.projectId, p.id))
+        .select(({ i }) => ({
+          id: i.id,
+          title: i.title,
+        })),
+    ),
+  })),
+)
+```
+
+With `toArray()`, the project row is re-emitted whenever its issues change. Without it, the child `Collection` updates independently.
+
+### Aggregates
+
+You can use aggregate functions in child queries. Aggregates are computed per parent:
+
+```ts
+import { createLiveQueryCollection, eq, count } from '@tanstack/db'
+
+const projectsWithCounts = createLiveQueryCollection((q) =>
+  q.from({ p: projectsCollection }).select(({ p }) => ({
+    id: p.id,
+    name: p.name,
+    issueCount: q
+      .from({ i: issuesCollection })
+      .where(({ i }) => eq(i.projectId, p.id))
+      .select(({ i }) => ({ total: count(i.id) })),
+  })),
+)
+```
+
+Each project gets its own count. The count updates reactively as issues are added or removed.
+
+### Nested Includes
+
+Includes nest arbitrarily. For example, projects can include issues, which include comments:
+
+```ts
+const tree = createLiveQueryCollection((q) =>
+  q.from({ p: projectsCollection }).select(({ p }) => ({
+    id: p.id,
+    name: p.name,
+    issues: q
+      .from({ i: issuesCollection })
+      .where(({ i }) => eq(i.projectId, p.id))
+      .select(({ i }) => ({
+        id: i.id,
+        title: i.title,
+        comments: q
+          .from({ c: commentsCollection })
+          .where(({ c }) => eq(c.issueId, i.id))
+          .select(({ c }) => ({
+            id: c.id,
+            body: c.body,
+          })),
+      })),
+  })),
+)
+```
+
+Each level updates independently and incrementally — adding a comment to an issue does not re-process other issues or projects.
+
+### Using Includes with React
+
+When using includes with React, each child `Collection` needs its own `useLiveQuery` subscription to receive reactive updates. Pass the child collection to a subcomponent that calls `useLiveQuery(childCollection)`:
+
+```tsx
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+function ProjectList() {
+  const { data: projects } = useLiveQuery((q) =>
+    q.from({ p: projectsCollection }).select(({ p }) => ({
+      id: p.id,
+      name: p.name,
+      issues: q
+        .from({ i: issuesCollection })
+        .where(({ i }) => eq(i.projectId, p.id))
+        .select(({ i }) => ({
+          id: i.id,
+          title: i.title,
+        })),
+    })),
+  )
+
+  return (
+    <ul>
+      {projects.map((project) => (
+        <li key={project.id}>
+          {project.name}
+          {/* Pass the child collection to a subcomponent */}
+          <IssueList issuesCollection={project.issues} />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function IssueList({ issuesCollection }) {
+  // Subscribe to the child collection for reactive updates
+  const { data: issues } = useLiveQuery(issuesCollection)
+
+  return (
+    <ul>
+      {issues.map((issue) => (
+        <li key={issue.id}>{issue.title}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+Each `IssueList` component independently subscribes to its project's issues. When an issue is added or removed, only the affected `IssueList` re-renders — the parent `ProjectList` does not.
+
+> [!NOTE]
+> You must pass the child collection to a subcomponent and subscribe with `useLiveQuery`. Reading `project.issues` directly in the parent without subscribing will give you the collection object, but the component won't re-render when the child data changes.
+
 ## groupBy and Aggregations
 
 Use `groupBy` to group your data and apply aggregate functions. When you use aggregates in `select` without `groupBy`, the entire result set is treated as a single group.
@@ -774,8 +1309,11 @@ const departmentStats = createCollection(liveQueryCollectionOptions({
 > In `groupBy` queries, the properties in your `select` clause must either be:
 > - An aggregate function (like `count`, `sum`, `avg`)
 > - A property that was used in the `groupBy` clause
-> 
+>
 > You cannot select properties that are neither aggregated nor grouped.
+
+> [!WARNING]
+> `fn.select()` cannot be used with `groupBy()`. The `groupBy` operator needs to statically analyze the `select` clause to discover which aggregate functions (`count`, `sum`, `max`, etc.) to compute for each group. Since `fn.select()` is an opaque JavaScript function, the compiler cannot inspect it. Use the standard `.select()` API when combining with `groupBy()`.
 
 ### Multiple Column Grouping
 
@@ -834,10 +1372,19 @@ having(
 ```
 
 **Parameters:**
-- `condition` - A callback function that receives the aggregated row object and returns a boolean expression
+- `condition` - A callback function that receives table references (and `$selected` if the query contains a `select()` clause) and returns a boolean expression
 
 ```ts
+// Using aggregate functions directly
 const highValueCustomers = createLiveQueryCollection((q) =>
+  q
+    .from({ order: ordersCollection })
+    .groupBy(({ order }) => order.customerId)
+    .having(({ order }) => gt(sum(order.amount), 1000))
+)
+
+// Using SELECT fields via $selected (recommended when select() is used)
+const highValueCustomersWithSelect = createLiveQueryCollection((q) =>
   q
     .from({ order: ordersCollection })
     .groupBy(({ order }) => order.customerId)
@@ -846,7 +1393,7 @@ const highValueCustomers = createLiveQueryCollection((q) =>
       totalSpent: sum(order.amount),
       orderCount: count(order.id),
     }))
-    .having(({ order }) => gt(sum(order.amount), 1000))
+    .having(({ $selected }) => gt($selected.totalSpent, 1000))
 )
 ```
 
@@ -891,6 +1438,106 @@ const engineeringStats = deptStats.get(1)
 > **Note**: Grouped results are keyed differently based on the grouping:
 > - **Single column grouping**: Keyed by the actual value (e.g., `deptStats.get(1)`)
 > - **Multiple column grouping**: Keyed by a JSON string of the grouped values (e.g., `userStats.get('[1,"admin"]')`)
+
+## findOne
+
+Use `findOne` to return a single result instead of an array. This is useful when you expect to find at most one matching record, such as when querying by a unique identifier.
+
+The `findOne` method changes the return type from an array to a single object or `undefined`. When no matching record is found, the result is `undefined`.
+
+### Method Signature
+
+```ts
+findOne(): Query
+```
+
+### Basic Usage
+
+Find a specific user by ID:
+
+```ts
+const user = createLiveQueryCollection((q) =>
+  q
+    .from({ users: usersCollection })
+    .where(({ users }) => eq(users.id, 1))
+    .findOne()
+)
+
+// Result type: User | undefined
+// If user with id=1 exists: { id: 1, name: 'John', ... }
+// If not found: undefined
+```
+
+### With React Hooks
+
+Use `findOne` with `useLiveQuery` to get a single record:
+
+```tsx
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+function UserProfile({ userId }: { userId: string }) {
+  const { data: user, isLoading } = useLiveQuery((q) =>
+    q
+      .from({ users: usersCollection })
+      .where(({ users }) => eq(users.id, userId))
+      .findOne()
+  , [userId])
+
+  if (isLoading) return <div>Loading...</div>
+  if (!user) return <div>User not found</div>
+
+  return <div>{user.name}</div>
+}
+```
+
+### With Select
+
+Combine `findOne` with `select` to project specific fields:
+
+```ts
+const userEmail = createLiveQueryCollection((q) =>
+  q
+    .from({ users: usersCollection })
+    .where(({ users }) => eq(users.id, 1))
+    .select(({ users }) => ({
+      id: users.id,
+      email: users.email,
+    }))
+    .findOne()
+)
+
+// Result type: { id: number, email: string } | undefined
+```
+
+### Return Type Behavior
+
+The return type changes based on whether `findOne` is used:
+
+```ts
+// Without findOne - returns array
+const users = createLiveQueryCollection((q) =>
+  q.from({ users: usersCollection })
+)
+// Type: Array<User>
+
+// With findOne - returns single object or undefined
+const user = createLiveQueryCollection((q) =>
+  q.from({ users: usersCollection }).findOne()
+)
+// Type: User | undefined
+```
+
+### Best Practices
+
+**Use when:**
+- Querying by unique identifiers (ID, email, etc.)
+- You expect at most one result
+- You want type-safe single-record access without array indexing
+
+**Avoid when:**
+- You might have multiple matching records (use regular queries instead)
+- You need to iterate over results
 
 ## Distinct
 
@@ -1011,6 +1658,26 @@ const sortedUsers = createLiveQueryCollection((q) =>
       name: user.name,
       departmentId: user.departmentId,
     }))
+)
+```
+
+### Ordering by SELECT Fields
+
+When you use `select()` with aggregates or computed values, you can order by those fields using the `$selected` namespace:
+
+```ts
+const topCustomers = createLiveQueryCollection((q) =>
+  q
+    .from({ order: ordersCollection })
+    .groupBy(({ order }) => order.customerId)
+    .select(({ order }) => ({
+      customerId: order.customerId,
+      totalSpent: sum(order.amount),
+      orderCount: count(order.id),
+      latestOrder: max(order.createdAt),
+    }))
+    .orderBy(({ $selected }) => $selected.totalSpent, 'desc')
+    .limit(10)
 )
 ```
 
@@ -1138,21 +1805,33 @@ const userPosts = createLiveQueryCollection((q) =>
 
 ### Reusable Callback Functions
 
-Use `Ref<MyType>` to create reusable callback functions:
+Creating reusable query logic is a common pattern that improves code organization and maintainability. The recommended approach is to use callback functions with the `Ref<T>` type rather than trying to type `QueryBuilder` instances directly.
+
+#### The Recommended Pattern
+
+Use `Ref<MyType>` to create reusable filter and transform functions:
 
 ```ts
-import { Ref, eq, gt, and } from '@tanstack/db'
+import type { Ref } from '@tanstack/db'
+import { eq, gt, and } from '@tanstack/db'
 
-// Create reusable callbacks
-const isActiveUser = (user: Ref<User>) => eq(user.active, true)
-const isAdultUser = (user: Ref<User>) => gt(user.age, 18)
+// Create reusable filter callbacks
+const isActiveUser = ({ user }: { user: Ref<User> }) =>
+  eq(user.active, true)
 
-// Use them in queries
+const isAdultUser = ({ user }: { user: Ref<User> }) =>
+  gt(user.age, 18)
+
+const isActiveAdult = ({ user }: { user: Ref<User> }) =>
+  and(isActiveUser({ user }), isAdultUser({ user }))
+
+// Use them in queries - they work seamlessly with .where()
 const activeAdults = createCollection(liveQueryCollectionOptions({
   query: (q) =>
     q
       .from({ user: usersCollection })
-      .where(({ user }) => and(isActiveUser(user), isAdultUser(user)))
+      .where(isActiveUser)
+      .where(isAdultUser)
       .select(({ user }) => ({
         id: user.id,
         name: user.name,
@@ -1161,19 +1840,62 @@ const activeAdults = createCollection(liveQueryCollectionOptions({
 }))
 ```
 
-You can also create callbacks that take the whole row and pass them directly to `where`:
+The callback signature `({ user }: { user: Ref<User> }) => Expression` matches exactly what `.where()` expects, making it type-safe and composable.
+
+#### Chaining Multiple Filters
+
+You can chain multiple reusable filters:
+
+```tsx
+import { useLiveQuery } from '@tanstack/react-db'
+
+const { data } = useLiveQuery((q) => {
+  return q
+    .from({ item: itemsCollection })
+    .where(({ item }) => eq(item.id, 1))
+    .where(activeItemFilter)      // Reusable filter 1
+    .where(verifiedItemFilter)     // Reusable filter 2
+    .select(({ item }) => ({ ...item }))
+}, [])
+```
+
+#### Using with Different Aliases
+
+The pattern works with any table alias:
 
 ```ts
-// Callback that takes the whole row
-const isHighValueCustomer = (row: { user: User; order: Order }) => 
-  row.user.active && row.order.amount > 1000
+const activeFilter = ({ item }: { item: Ref<Item> }) =>
+  eq(item.active, true)
+
+// Works with any alias name
+const query1 = new Query()
+  .from({ item: itemsCollection })
+  .where(activeFilter)
+
+const query2 = new Query()
+  .from({ i: itemsCollection })
+  .where(({ i }) => activeFilter({ item: i }))  // Map the alias
+```
+
+#### Callbacks with Multiple Tables
+
+For queries with joins, create callbacks that accept multiple refs:
+
+```ts
+const isHighValueCustomer = ({ user, order }: {
+  user: Ref<User>
+  order: Ref<Order>
+}) => and(
+  eq(user.active, true),
+  gt(order.amount, 1000)
+)
 
 // Use directly in where clause
 const highValueCustomers = createCollection(liveQueryCollectionOptions({
   query: (q) =>
     q
       .from({ user: usersCollection })
-      .join({ order: ordersCollection }, ({ user, order }) => 
+      .join({ order: ordersCollection }, ({ user, order }) =>
         eq(user.id, order.userId)
       )
       .where(isHighValueCustomer)
@@ -1184,7 +1906,405 @@ const highValueCustomers = createCollection(liveQueryCollectionOptions({
 }))
 ```
 
-This approach makes your query logic more modular and testable.
+#### Why Not Type QueryBuilder?
+
+You might be tempted to create functions that accept and return `QueryBuilder`:
+
+```ts
+// ❌ Not recommended - overly complex typing
+const applyFilters = <T extends QueryBuilder<unknown>>(query: T): T => {
+  return query.where(({ item }) => eq(item.active, true))
+}
+```
+
+This approach has several issues:
+
+1. **Complex Types**: `QueryBuilder<T>` generic represents the entire query context including base schema, current schema, joins, result types, etc.
+2. **Type Inference**: The type changes with every method call, making it impractical to type manually
+3. **Limited Flexibility**: Hard to compose multiple filters or use with different table aliases
+
+Instead, use callback functions that work with the `.where()`, `.select()`, and other query methods directly.
+
+#### Reusable Select Transformations
+
+You can also create reusable select projections:
+
+```ts
+const basicUserInfo = ({ user }: { user: Ref<User> }) => ({
+  id: user.id,
+  name: user.name,
+  email: user.email,
+})
+
+const userWithStats = ({ user }: { user: Ref<User> }) => ({
+  ...basicUserInfo({ user }),
+  isAdult: gt(user.age, 18),
+  isActive: eq(user.active, true),
+})
+
+const users = createLiveQueryCollection((q) =>
+  q
+    .from({ user: usersCollection })
+    .select(userWithStats)
+)
+```
+
+This approach makes your query logic more modular, testable, and reusable across your application.
+
+## Reactive Effects (createEffect)
+
+While live query collections materialise query results into a collection you can subscribe to and iterate over, **reactive effects** let you respond to query result *changes* without materialising the full result set. Effects fire callbacks when rows enter, exit, or update within a query result.
+
+This is useful for triggering side effects — sending notifications, syncing to external systems, generating AI responses, updating counters — whenever your data changes.
+
+### When to Use Effects vs Live Query Collections
+
+| Use case | Approach |
+|----------|----------|
+| Display query results in UI | Live query collection + `useLiveQuery` |
+| React to changes (side effects) | `createEffect` / `useLiveQueryEffect` |
+| Track new items entering a result set | `createEffect` with `onEnter` |
+| Monitor items leaving a result set | `createEffect` with `onExit` |
+| Respond to updates within a result set | `createEffect` with `onUpdate` |
+
+### Basic Usage
+
+```ts
+import { createEffect, eq } from '@tanstack/db'
+
+const effect = createEffect({
+  query: (q) =>
+    q
+      .from({ msg: messagesCollection })
+      .where(({ msg }) => eq(msg.role, 'user')),
+  onEnter: async (event) => {
+    console.log('New user message:', event.value)
+    await generateResponse(event.value)
+  },
+})
+
+// Later: stop the effect
+await effect.dispose()
+```
+
+### Configuration
+
+`createEffect` accepts an `EffectConfig` object:
+
+```ts
+const effect = createEffect({
+  id: 'my-effect',            // Optional: auto-generated if not provided
+  query: (q) => q.from(...), // Query to watch
+  onEnter: (event, ctx) => { ... },  // Per-enter callback
+  onUpdate: (event, ctx) => { ... }, // Per-update callback
+  onExit: (event, ctx) => { ... },   // Per-exit callback
+  onBatch: (events, ctx) => { ... }, // Full batch callback
+  onError: (error, event) => { ... }, // Callback error handler
+  onSourceError: (error) => { ... },  // Source collection error callback
+  skipInitial: false,          // Skip deltas during initial load
+})
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `id` | `string` (optional) | Identifier for debugging/tracing. Auto-generated as `live-query-effect-{n}` if not provided. |
+| `query` | `QueryBuilder` or function | The query to watch. Accepts the same builder function or `QueryBuilder` instance as live query collections. |
+| `onEnter` | `(event, ctx) => void \| Promise<void>` (optional) | Called once for each row entering the query result. |
+| `onUpdate` | `(event, ctx) => void \| Promise<void>` (optional) | Called once for each row updating within the query result. |
+| `onExit` | `(event, ctx) => void \| Promise<void>` (optional) | Called once for each row exiting the query result. |
+| `onBatch` | `(events, ctx) => void \| Promise<void>` (optional) | Called once per graph run with the full unfiltered batch of delta events. |
+| `onError` | `(error, event) => void` (optional) | Called when `onEnter`, `onUpdate`, `onExit`, or `onBatch` throws or rejects. |
+| `onSourceError` | `(error) => void` (optional) | Called when a source collection enters an error or cleaned-up state. The effect is automatically disposed after this fires. If not provided, the error is logged to `console.error`. |
+| `skipInitial` | `boolean` (optional) | When `true`, deltas from the initial data load are suppressed. Only subsequent changes fire handlers. Defaults to `false`. |
+
+### Delta Events
+
+Each delta event describes a single row change within the query result:
+
+```ts
+interface DeltaEvent<TRow, TKey> {
+  type: 'enter' | 'exit' | 'update'
+  key: TKey
+  value: TRow
+  previousValue?: TRow  // Only present for 'update' events
+}
+```
+
+| Event type | Meaning | `value` | `previousValue` |
+|------------|---------|---------|------------------|
+| `enter` | Row entered the query result | The new row | — |
+| `exit` | Row left the query result | The exiting row | — |
+| `update` | Row changed but stayed in the result | The new row | The row before the change |
+
+### Named Callbacks
+
+Use the callback that matches the query-result transition you care about:
+
+```ts
+// Only new rows entering the result
+createEffect({ onEnter: (event) => { ... }, ... })
+
+// Only rows leaving the result
+createEffect({ onExit: (event) => { ... }, ... })
+
+// Only rows that changed but stayed in the result
+createEffect({ onUpdate: (event) => { ... }, ... })
+
+// Inspect the full mixed batch for a graph run
+createEffect({ onBatch: (events) => { ... }, ... })
+```
+
+### Per-Row Callbacks vs `onBatch`
+
+You can provide per-row callbacks, `onBatch`, or both:
+
+```ts
+createEffect({
+  query: (q) => q.from({ user: usersCollection }),
+
+  onEnter: (event, ctx) => {
+    console.log(`enter: ${event.key}`)
+  },
+
+  onExit: (event, ctx) => {
+    console.log(`exit: ${event.key}`)
+  },
+
+  onBatch: (events, ctx) => {
+    console.log(`Batch of ${events.length} events`)
+  },
+})
+```
+
+Both handlers receive an `EffectContext`:
+
+```ts
+interface EffectContext {
+  effectId: string   // The effect's ID
+  signal: AbortSignal // Aborted when effect.dispose() is called
+}
+```
+
+The `signal` is useful for cancelling in-flight async work when the effect is disposed:
+
+```ts
+createEffect({
+  query: (q) => q.from({ task: tasksCollection }),
+  onEnter: async (event, ctx) => {
+    const result = await fetch('/api/process', {
+      method: 'POST',
+      body: JSON.stringify(event.value),
+      signal: ctx.signal, // Cancelled on dispose
+    })
+    // ...
+  },
+})
+```
+
+### Skipping Initial Data
+
+By default, effects process all data including the initial load. Set `skipInitial: true` to only respond to changes that happen after the initial sync:
+
+```ts
+// Only react to NEW messages, not existing ones
+const effect = createEffect({
+  query: (q) =>
+    q.from({ msg: messagesCollection })
+     .where(({ msg }) => eq(msg.role, 'user')),
+  skipInitial: true,
+  onEnter: async (event) => {
+    await sendNotification(event.value)
+  },
+})
+```
+
+### Error Handling
+
+Errors thrown by `onEnter`, `onUpdate`, `onExit`, or `onBatch` (sync or async) are caught and routed to `onError`. If no `onError` is provided, they are logged to `console.error`:
+
+```ts
+createEffect({
+  query: (q) => q.from({ order: ordersCollection }),
+  onEnter: async (event) => {
+    await processOrder(event.value)
+  },
+  onError: (error, event) => {
+    console.error(`Failed to process order ${event.key}:`, error)
+    reportToErrorTracker(error)
+  },
+})
+```
+
+If a source collection enters an error or cleaned-up state, the effect automatically disposes itself. Use `onSourceError` to handle this:
+
+```ts
+createEffect({
+  query: (q) => q.from({ data: dataCollection }),
+  onBatch: (events) => { ... },
+  onSourceError: (error) => {
+    console.warn('Data source failed, effect disposed:', error.message)
+  },
+})
+```
+
+### Disposal
+
+`createEffect` returns an `Effect` handle with a `dispose()` method:
+
+```ts
+const effect = createEffect({ ... })
+
+// Check if disposed
+console.log(effect.disposed) // false
+
+// Dispose: unsubscribes from sources, aborts the signal,
+// and waits for in-flight async handlers to settle
+await effect.dispose()
+
+console.log(effect.disposed) // true
+```
+
+`dispose()` is idempotent — calling it multiple times is safe. It returns a promise that resolves when all in-flight async handlers have settled (via `Promise.allSettled`).
+
+### Query Features
+
+Effects support the full query system — everything you can do with live query collections works with effects:
+
+```ts
+// Joins
+createEffect({
+  query: (q) =>
+    q
+      .from({ user: usersCollection })
+      .join({ post: postsCollection }, ({ user, post }) =>
+        eq(user.id, post.userId)
+      )
+      .select(({ user, post }) => ({
+        userName: user.name,
+        postTitle: post.title,
+      })),
+  onEnter: (event) => {
+    console.log(`${event.value.userName} published "${event.value.postTitle}"`)
+  },
+})
+
+// Filters
+createEffect({
+  query: (q) =>
+    q
+      .from({ user: usersCollection })
+      .where(({ user }) => eq(user.role, 'admin')),
+  onEnter: (event) => {
+    console.log(`New admin: ${event.value.name}`)
+  },
+})
+
+// OrderBy + Limit (top-K window)
+createEffect({
+  query: (q) =>
+    q
+      .from({ score: scoresCollection })
+      .orderBy(({ score }) => score.points, 'desc')
+      .limit(10),
+  onBatch: (events) => {
+    // Fires once per graph run with all enter/update/exit events
+    for (const event of events) {
+      console.log(`${event.type}: ${event.value.name} (${event.value.points} pts)`)
+    }
+  },
+})
+```
+
+When using `orderBy` with `limit`, effects track a top-K window. You receive `enter` events when items enter the window and `exit` events when they're displaced.
+
+### Transaction Coalescing
+
+When multiple changes occur within a single transaction, effects coalesce them into a single batch. This means your handlers are called once with all the changes from that transaction, not once per individual write:
+
+```ts
+createEffect({
+  query: (q) => q.from({ item: itemsCollection }),
+  onBatch: (events) => {
+    // If 3 items are inserted in one transaction,
+    // this fires once with all 3 events
+    console.log(`${events.length} items added`)
+  },
+})
+```
+
+### Using with React
+
+The `useLiveQueryEffect` hook manages the effect lifecycle automatically — creating on mount, disposing on unmount, and recreating when dependencies change:
+
+```tsx
+import { useLiveQueryEffect } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+
+function ChatComponent({ channelId }: { channelId: string }) {
+  useLiveQueryEffect(
+    {
+      query: (q) =>
+        q
+          .from({ msg: messagesCollection })
+          .where(({ msg }) => eq(msg.channelId, channelId)),
+      skipInitial: true,
+      onEnter: async (event) => {
+        await playNotificationSound()
+      },
+    },
+    [channelId] // Recreate effect when channelId changes
+  )
+
+  return <div>...</div>
+}
+```
+
+The second argument is a dependency array (like `useEffect`). When dependencies change, the old effect is disposed and a new one is created with the updated config.
+
+### Complete Example
+
+Here's a more complete example showing an effect that monitors order status changes and sends notifications:
+
+```ts
+import { createEffect, eq } from '@tanstack/db'
+
+const orderEffect = createEffect({
+  id: 'order-status-monitor',
+  query: (q) =>
+    q
+      .from({ order: ordersCollection })
+      .join({ customer: customersCollection }, ({ order, customer }) =>
+        eq(order.customerId, customer.id)
+      )
+      .where(({ order }) => eq(order.status, 'shipped'))
+      .select(({ order, customer }) => ({
+        orderId: order.id,
+        customerEmail: customer.email,
+        trackingNumber: order.trackingNumber,
+      })),
+  skipInitial: true,
+
+  onEnter: async (event, ctx) => {
+    await sendShipmentEmail({
+      to: event.value.customerEmail,
+      orderId: event.value.orderId,
+      tracking: event.value.trackingNumber,
+      signal: ctx.signal,
+    })
+  },
+
+  onError: (error, event) => {
+    console.error(`Failed to notify for order ${event.key}:`, error)
+  },
+
+  onSourceError: (error) => {
+    alertOpsTeam('Order monitoring effect failed', error)
+  },
+})
+
+// On application shutdown
+await orderEffect.dispose()
+```
 
 ## Expression Functions Reference
 
@@ -1220,6 +2340,41 @@ String pattern matching:
 ```ts
 like(user.name, 'John%')    // Case-sensitive
 ilike(user.email, '%@gmail.com')  // Case-insensitive
+```
+
+#### `isUndefined(value)`, `isNull(value)`
+Check for missing vs null values:
+```ts
+// Check if a property is missing/undefined
+isUndefined(user.profile)
+
+// Check if a value is explicitly null
+isNull(user.profile)
+```
+
+These functions are particularly important when working with joins and optional properties, as they distinguish between:
+- `undefined`: The property is absent or not present
+- `null`: The property exists but is explicitly set to null
+
+**Example with joins:**
+```ts
+// Find users without a matching profile (left join resulted in undefined)
+const usersWithoutProfiles = createLiveQueryCollection((q) =>
+  q
+    .from({ user: usersCollection })
+    .leftJoin(
+      { profile: profilesCollection },
+      ({ user, profile }) => eq(user.id, profile.userId)
+    )
+    .where(({ profile }) => isUndefined(profile))
+)
+
+// Find users with explicitly null bio field
+const usersWithNullBio = createLiveQueryCollection((q) =>
+  q
+    .from({ user: usersCollection })
+    .where(({ user }) => isNull(user.bio))
+)
 ```
 
 ### Logical Operators
@@ -1354,6 +2509,9 @@ The functional variant API provides an alternative to the standard API, offering
 
 ### Functional Select
 
+> [!WARNING]
+> `fn.select()` cannot be used with `groupBy()`. The `groupBy` operator needs to statically analyze the `select` clause to discover which aggregate functions to compute, which is not possible with an opaque JavaScript function. Use the standard `.select()` API for grouped queries.
+
 Use `fn.select()` for complex transformations with JavaScript logic:
 
 ```ts
@@ -1401,8 +2559,8 @@ const highValueCustomers = createLiveQueryCollection((q) =>
       totalSpent: sum(order.amount),
       orderCount: count(order.id),
     }))
-    .fn.having((row) => {
-      return row.totalSpent > 1000 && row.orderCount >= 3
+    .fn.having(({ $selected }) => {
+      return $selected.totalSpent > 1000 && $selected.orderCount >= 3
     })
 )
 ```

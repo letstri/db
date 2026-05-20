@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest"
-import { act, renderHook, waitFor } from "@testing-library/react"
+import { describe, expect, it } from 'vitest'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import {
   Query,
+  coalesce,
   count,
   createCollection,
   createLiveQueryCollection,
@@ -9,10 +10,14 @@ import {
   eq,
   gt,
   lte,
-} from "@tanstack/db"
-import { useEffect } from "react"
-import { useLiveQuery } from "../src/useLiveQuery"
-import { mockSyncCollectionOptions } from "../../db/tests/utils"
+  sum,
+} from '@tanstack/db'
+import { useEffect } from 'react'
+import { useLiveQuery } from '../src/useLiveQuery'
+import {
+  mockSyncCollectionOptions,
+  stripVirtualProps,
+} from '../../db/tests/utils'
 
 type Person = {
   id: string
@@ -85,7 +90,7 @@ describe(`Query Collections`, () => {
         id: `test-persons`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const { result } = renderHook(() => {
@@ -97,7 +102,7 @@ describe(`Query Collections`, () => {
             id: persons.id,
             name: persons.name,
             age: persons.age,
-          }))
+          })),
       )
     })
 
@@ -121,7 +126,7 @@ describe(`Query Collections`, () => {
         id: `test-persons`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const { result, rerender } = renderHook(() => {
@@ -133,7 +138,7 @@ describe(`Query Collections`, () => {
             id: persons.id,
             name: persons.name,
             age: persons.age,
-          }))
+          })),
       )
     })
 
@@ -157,13 +162,119 @@ describe(`Query Collections`, () => {
     expect(data1).toBe(data2)
   })
 
+  it(`should be able to return a single row with query builder`, async () => {
+    const collection = createCollection(
+      mockSyncCollectionOptions<Person>({
+        id: `test-persons-2`,
+        getKey: (person: Person) => person.id,
+        initialData: initialPersons,
+      }),
+    )
+
+    const { result } = renderHook(() => {
+      return useLiveQuery((q) =>
+        q
+          .from({ collection })
+          .where(({ collection: c }) => eq(c.id, `3`))
+          .findOne(),
+      )
+    })
+
+    // Wait for collection to sync
+    await waitFor(() => {
+      expect(result.current.state.size).toBe(1)
+    })
+
+    expect(result.current.state.get(`3`)).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+
+    expect(result.current.data).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+  })
+
+  it(`should be able to return a single row with config object`, async () => {
+    const collection = createCollection(
+      mockSyncCollectionOptions<Person>({
+        id: `test-persons-2`,
+        getKey: (person: Person) => person.id,
+        initialData: initialPersons,
+      }),
+    )
+
+    const { result } = renderHook(() => {
+      return useLiveQuery({
+        query: (q) =>
+          q
+            .from({ collection })
+            .where(({ collection: c }) => eq(c.id, `3`))
+            .findOne(),
+      })
+    })
+
+    // Wait for collection to sync
+    await waitFor(() => {
+      expect(result.current.state.size).toBe(1)
+    })
+
+    expect(result.current.state.get(`3`)).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+
+    expect(result.current.data).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+  })
+
+  it(`should be able to return a single row with collection`, async () => {
+    const collection = createCollection(
+      mockSyncCollectionOptions<Person>({
+        id: `test-persons-2`,
+        getKey: (person: Person) => person.id,
+        initialData: initialPersons,
+      }),
+    )
+
+    const liveQueryCollection = createLiveQueryCollection({
+      query: (q) =>
+        q
+          .from({ collection })
+          .where(({ collection: c }) => eq(c.id, `3`))
+          .findOne(),
+    })
+
+    const { result } = renderHook(() => {
+      return useLiveQuery(liveQueryCollection)
+    })
+
+    // Wait for collection to sync
+    await waitFor(() => {
+      expect(result.current.state.size).toBe(1)
+    })
+
+    expect(result.current.state.get(`3`)).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+
+    expect(result.current.data).toMatchObject({
+      id: `3`,
+      name: `John Smith`,
+    })
+  })
+
   it(`should be able to query a collection with live updates`, async () => {
     const collection = createCollection(
       mockSyncCollectionOptions<Person>({
         id: `test-persons-2`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const { result } = renderHook(() => {
@@ -175,7 +286,7 @@ describe(`Query Collections`, () => {
             id: c.id,
             name: c.name,
           }))
-          .orderBy(({ collection: c }) => c.id, `asc`)
+          .orderBy(({ collection: c }) => c.id, `asc`),
       )
     })
 
@@ -234,7 +345,7 @@ describe(`Query Collections`, () => {
           id: `4`,
           name: `Kyle Doe`,
         }),
-      ])
+      ]),
     )
 
     // Update the person
@@ -273,7 +384,7 @@ describe(`Query Collections`, () => {
           id: `4`,
           name: `Kyle Doe 2`,
         }),
-      ])
+      ]),
     )
 
     // Delete the person
@@ -312,7 +423,7 @@ describe(`Query Collections`, () => {
         id: `person-collection-test`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     // Create issue collection
@@ -321,7 +432,7 @@ describe(`Query Collections`, () => {
         id: `issue-collection-test`,
         getKey: (issue: Issue) => issue.id,
         initialData: initialIssues,
-      })
+      }),
     )
 
     const { result } = renderHook(() => {
@@ -329,13 +440,13 @@ describe(`Query Collections`, () => {
         q
           .from({ issues: issueCollection })
           .join({ persons: personCollection }, ({ issues, persons }) =>
-            eq(issues.userId, persons.id)
+            eq(issues.userId, persons.id),
           )
           .select(({ issues, persons }) => ({
             id: issues.id,
             title: issues.title,
-            name: persons?.name,
-          }))
+            name: persons.name,
+          })),
       )
     })
 
@@ -440,7 +551,7 @@ describe(`Query Collections`, () => {
         id: `params-change-test`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const { result, rerender } = renderHook(
@@ -455,10 +566,10 @@ describe(`Query Collections`, () => {
                 name: c.name,
                 age: c.age,
               })),
-          [minAge]
+          [minAge],
         )
       },
-      { initialProps: { minAge: 30 } }
+      { initialProps: { minAge: 30 } },
     )
 
     // Wait for collection to sync
@@ -514,7 +625,7 @@ describe(`Query Collections`, () => {
         id: `stop-query-test`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const { result, rerender } = renderHook(
@@ -528,10 +639,10 @@ describe(`Query Collections`, () => {
                 id: c.id,
                 name: c.name,
               })),
-          [minAge]
+          [minAge],
         )
       },
-      { initialProps: { minAge: 30 } }
+      { initialProps: { minAge: 30 } },
     )
 
     // Wait for collection to sync
@@ -579,7 +690,7 @@ describe(`Query Collections`, () => {
         id: `optimistic-changes-test`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     // Initial query
@@ -593,7 +704,7 @@ describe(`Query Collections`, () => {
             name: c.name,
             team: c.team,
           }))
-          .orderBy(({ collection: c }) => c.id, `asc`)
+          .orderBy(({ collection: c }) => c.id, `asc`),
       )
     })
 
@@ -609,7 +720,7 @@ describe(`Query Collections`, () => {
           .select(({ queryResult }) => ({
             team: queryResult.team,
             count: count(queryResult.id),
-          }))
+          })),
       )
     })
 
@@ -686,7 +797,7 @@ describe(`Query Collections`, () => {
         id: `person-collection-test-bug`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     // Create issue collection
@@ -695,7 +806,7 @@ describe(`Query Collections`, () => {
         id: `issue-collection-test-bug`,
         getKey: (issue: Issue) => issue.id,
         initialData: initialIssues,
-      })
+      }),
     )
 
     // Render the hook with a query that joins persons and issues
@@ -704,13 +815,13 @@ describe(`Query Collections`, () => {
         q
           .from({ issues: issueCollection })
           .join({ persons: personCollection }, ({ issues, persons }) =>
-            eq(issues.userId, persons.id)
+            eq(issues.userId, persons.id),
           )
           .select(({ issues, persons }) => ({
             id: issues.id,
             title: issues.title,
-            name: persons?.name,
-          }))
+            name: persons.name,
+          })),
       )
 
       // Track each render state
@@ -797,13 +908,13 @@ describe(`Query Collections`, () => {
     await waitFor(() => {
       // Verify optimistic state is immediately reflected
       expect(result.current.state.size).toBe(4)
+      expect(result.current.state.get(`[temp-key,1]`)).toMatchObject({
+        id: `temp-key`,
+        name: `John Doe`,
+        title: `New Issue`,
+      })
+      expect(result.current.state.get(`[4,1]`)).toBeUndefined()
     })
-    expect(result.current.state.get(`[temp-key,1]`)).toMatchObject({
-      id: `temp-key`,
-      name: `John Doe`,
-      title: `New Issue`,
-    })
-    expect(result.current.state.get(`[4,1]`)).toBeUndefined()
 
     // Wait for the transaction to be committed
     await transaction.isPersisted.promise
@@ -815,7 +926,8 @@ describe(`Query Collections`, () => {
 
     // Check if we had any render where the temp key was removed but the permanent key wasn't added yet
     const hadFlicker = renderStates.some(
-      (state) => !state.hasTempKey && !state.hasPermKey && state.stateSize === 3
+      (state) =>
+        !state.hasTempKey && !state.hasPermKey && state.stateSize === 3,
     )
 
     expect(hadFlicker).toBe(false)
@@ -836,7 +948,7 @@ describe(`Query Collections`, () => {
         id: `pre-created-collection-test`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     // Create a live query collection beforehand
@@ -880,7 +992,7 @@ describe(`Query Collections`, () => {
         id: `collection-1`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     const collection2 = createCollection(
@@ -905,7 +1017,7 @@ describe(`Query Collections`, () => {
             team: `team3`,
           },
         ],
-      })
+      }),
     )
 
     // Create two different live query collections
@@ -937,7 +1049,7 @@ describe(`Query Collections`, () => {
       ({ collection }: { collection: any }) => {
         return useLiveQuery(collection)
       },
-      { initialProps: { collection: liveQueryCollection1 } }
+      { initialProps: { collection: liveQueryCollection1 } },
     )
 
     // Wait for first collection to sync
@@ -979,7 +1091,7 @@ describe(`Query Collections`, () => {
         id: `test-persons-config-querybuilder`,
         getKey: (person: Person) => person.id,
         initialData: initialPersons,
-      })
+      }),
     )
 
     // Create a QueryBuilder instance beforehand
@@ -1043,7 +1155,7 @@ describe(`Query Collections`, () => {
             .select(({ persons }) => ({
               id: persons.id,
               name: persons.name,
-            }))
+            })),
         )
       })
 
@@ -1089,7 +1201,7 @@ describe(`Query Collections`, () => {
           id: `pre-created-has-loaded-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       // Create a live query collection that's already syncing
@@ -1147,7 +1259,7 @@ describe(`Query Collections`, () => {
             .select(({ persons }) => ({
               id: persons.id,
               name: persons.name,
-            }))
+            })),
         )
       })
 
@@ -1196,7 +1308,7 @@ describe(`Query Collections`, () => {
           id: `live-updates-has-loaded-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       const { result } = renderHook(() => {
@@ -1207,7 +1319,7 @@ describe(`Query Collections`, () => {
             .select(({ persons }) => ({
               id: persons.id,
               name: persons.name,
-            }))
+            })),
         )
       })
 
@@ -1292,13 +1404,13 @@ describe(`Query Collections`, () => {
           q
             .from({ issues: issueCollection })
             .join({ persons: personCollection }, ({ issues, persons }) =>
-              eq(issues.userId, persons.id)
+              eq(issues.userId, persons.id),
             )
             .select(({ issues, persons }) => ({
               id: issues.id,
               title: issues.title,
-              name: persons?.name,
-            }))
+              name: persons.name,
+            })),
         )
       })
 
@@ -1385,10 +1497,10 @@ describe(`Query Collections`, () => {
                   id: c.id,
                   name: c.name,
                 })),
-            [minAge]
+            [minAge],
           )
         },
-        { initialProps: { minAge: 30 } }
+        { initialProps: { minAge: 30 } },
       )
 
       // Initially should be false
@@ -1446,6 +1558,423 @@ describe(`Query Collections`, () => {
     })
   })
 
+  describe(`eager execution during sync`, () => {
+    it(`should show state while isLoading is true during sync`, async () => {
+      let syncBegin: (() => void) | undefined
+      let syncWrite: ((op: any) => void) | undefined
+      let syncCommit: (() => void) | undefined
+      let syncMarkReady: (() => void) | undefined
+
+      // Create a collection that doesn't auto-start syncing
+      const collection = createCollection<Person>({
+        id: `eager-execution-test`,
+        getKey: (person: Person) => person.id,
+        startSync: false,
+        sync: {
+          sync: ({ begin, write, commit, markReady }) => {
+            syncBegin = begin
+            syncWrite = write
+            syncCommit = commit
+            syncMarkReady = markReady
+          },
+        },
+        onInsert: async () => {},
+        onUpdate: async () => {},
+        onDelete: async () => {},
+      })
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ persons: collection })
+            .where(({ persons }) => gt(persons.age, 30))
+            .select(({ persons }) => ({
+              id: persons.id,
+              name: persons.name,
+            })),
+        )
+      })
+
+      // Initially isLoading should be true
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.state.size).toBe(0)
+      expect(result.current.data).toEqual([])
+
+      // Start sync manually
+      act(() => {
+        collection.preload()
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      // Still loading
+      expect(result.current.isLoading).toBe(true)
+
+      // Add first batch of data (but don't mark ready yet)
+      act(() => {
+        syncBegin!()
+        syncWrite!({
+          type: `insert`,
+          value: {
+            id: `1`,
+            name: `John Smith`,
+            age: 35,
+            email: `john.smith@example.com`,
+            isActive: true,
+            team: `team1`,
+          },
+        })
+        syncCommit!()
+      })
+
+      // Data should be visible even though still loading
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(1)
+      })
+      expect(result.current.isLoading).toBe(true) // Still loading
+      expect(result.current.data).toHaveLength(1)
+      expect(result.current.data[0]).toMatchObject({
+        id: `1`,
+        name: `John Smith`,
+      })
+
+      // Add second batch of data
+      act(() => {
+        syncBegin!()
+        syncWrite!({
+          type: `insert`,
+          value: {
+            id: `2`,
+            name: `Jane Doe`,
+            age: 32,
+            email: `jane.doe@example.com`,
+            isActive: true,
+            team: `team2`,
+          },
+        })
+        syncCommit!()
+      })
+
+      // More data should be visible
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(2)
+      })
+      expect(result.current.isLoading).toBe(true) // Still loading
+      expect(result.current.data).toHaveLength(2)
+
+      // Now mark as ready
+      act(() => {
+        syncMarkReady!()
+      })
+
+      // Should now be ready
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      expect(result.current.isReady).toBe(true)
+      expect(result.current.state.size).toBe(2)
+      expect(result.current.data).toHaveLength(2)
+    })
+
+    it(`should show filtered results during sync with isLoading true`, async () => {
+      let syncBegin: (() => void) | undefined
+      let syncWrite: ((op: any) => void) | undefined
+      let syncCommit: (() => void) | undefined
+      let syncMarkReady: (() => void) | undefined
+
+      const collection = createCollection<Person>({
+        id: `eager-filter-test`,
+        getKey: (person: Person) => person.id,
+        startSync: false,
+        sync: {
+          sync: ({ begin, write, commit, markReady }) => {
+            syncBegin = begin
+            syncWrite = write
+            syncCommit = commit
+            syncMarkReady = markReady
+          },
+        },
+        onInsert: async () => {},
+        onUpdate: async () => {},
+        onDelete: async () => {},
+      })
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ persons: collection })
+            .where(({ persons }) => eq(persons.team, `team1`))
+            .select(({ persons }) => ({
+              id: persons.id,
+              name: persons.name,
+              team: persons.team,
+            })),
+        )
+      })
+
+      // Start sync
+      act(() => {
+        collection.preload()
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      expect(result.current.isLoading).toBe(true)
+
+      // Add items from different teams
+      act(() => {
+        syncBegin!()
+        syncWrite!({
+          type: `insert`,
+          value: {
+            id: `1`,
+            name: `Alice`,
+            age: 30,
+            email: `alice@example.com`,
+            isActive: true,
+            team: `team1`,
+          },
+        })
+        syncWrite!({
+          type: `insert`,
+          value: {
+            id: `2`,
+            name: `Bob`,
+            age: 25,
+            email: `bob@example.com`,
+            isActive: true,
+            team: `team2`,
+          },
+        })
+        syncWrite!({
+          type: `insert`,
+          value: {
+            id: `3`,
+            name: `Charlie`,
+            age: 35,
+            email: `charlie@example.com`,
+            isActive: true,
+            team: `team1`,
+          },
+        })
+        syncCommit!()
+      })
+
+      // Should only show team1 members, even while loading
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(2)
+      })
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.data).toHaveLength(2)
+      expect(result.current.data.every((p) => p.team === `team1`)).toBe(true)
+
+      // Mark ready
+      act(() => {
+        syncMarkReady!()
+      })
+
+      await waitFor(() => {
+        expect(result.current.isReady).toBe(true)
+      })
+      expect(result.current.isLoading).toBe(false)
+      expect(result.current.state.size).toBe(2)
+    })
+
+    it(`should show join results during sync with isLoading true`, async () => {
+      let userSyncBegin: (() => void) | undefined
+      let userSyncWrite: ((op: any) => void) | undefined
+      let userSyncCommit: (() => void) | undefined
+      let userSyncMarkReady: (() => void) | undefined
+
+      let issueSyncBegin: (() => void) | undefined
+      let issueSyncWrite: ((op: any) => void) | undefined
+      let issueSyncCommit: (() => void) | undefined
+      let issueSyncMarkReady: (() => void) | undefined
+
+      const personCollection = createCollection<Person>({
+        id: `eager-join-persons`,
+        getKey: (person: Person) => person.id,
+        startSync: false,
+        sync: {
+          sync: ({ begin, write, commit, markReady }) => {
+            userSyncBegin = begin
+            userSyncWrite = write
+            userSyncCommit = commit
+            userSyncMarkReady = markReady
+          },
+        },
+        onInsert: async () => {},
+        onUpdate: async () => {},
+        onDelete: async () => {},
+      })
+
+      const issueCollection = createCollection<Issue>({
+        id: `eager-join-issues`,
+        getKey: (issue: Issue) => issue.id,
+        startSync: false,
+        sync: {
+          sync: ({ begin, write, commit, markReady }) => {
+            issueSyncBegin = begin
+            issueSyncWrite = write
+            issueSyncCommit = commit
+            issueSyncMarkReady = markReady
+          },
+        },
+        onInsert: async () => {},
+        onUpdate: async () => {},
+        onDelete: async () => {},
+      })
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ issues: issueCollection })
+            .join({ persons: personCollection }, ({ issues, persons }) =>
+              eq(issues.userId, persons.id),
+            )
+            .select(({ issues, persons }) => ({
+              id: issues.id,
+              title: issues.title,
+              userName: persons.name,
+            })),
+        )
+      })
+
+      // Start sync for both
+      act(() => {
+        personCollection.preload()
+        issueCollection.preload()
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      expect(result.current.isLoading).toBe(true)
+
+      // Add a person first
+      act(() => {
+        userSyncBegin!()
+        userSyncWrite!({
+          type: `insert`,
+          value: {
+            id: `1`,
+            name: `John Doe`,
+            age: 30,
+            email: `john@example.com`,
+            isActive: true,
+            team: `team1`,
+          },
+        })
+        userSyncCommit!()
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.state.size).toBe(0) // No joins yet
+
+      // Add an issue for that person
+      act(() => {
+        issueSyncBegin!()
+        issueSyncWrite!({
+          type: `insert`,
+          value: {
+            id: `1`,
+            title: `First Issue`,
+            description: `Description`,
+            userId: `1`,
+          },
+        })
+        issueSyncCommit!()
+      })
+
+      // Should see join result even while loading
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(1)
+      })
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.data).toHaveLength(1)
+      expect(result.current.data[0]).toMatchObject({
+        id: `1`,
+        title: `First Issue`,
+        userName: `John Doe`,
+      })
+
+      // Mark both as ready
+      act(() => {
+        userSyncMarkReady!()
+        issueSyncMarkReady!()
+      })
+
+      await waitFor(() => {
+        expect(result.current.isReady).toBe(true)
+      })
+      expect(result.current.isLoading).toBe(false)
+      expect(result.current.state.size).toBe(1)
+    })
+
+    it(`should update isReady when source collection is marked ready with no data`, async () => {
+      let syncMarkReady: (() => void) | undefined
+
+      const collection = createCollection<Person>({
+        id: `ready-no-data-test`,
+        getKey: (person: Person) => person.id,
+        startSync: false,
+        sync: {
+          sync: ({ markReady }) => {
+            syncMarkReady = markReady
+            // Don't call begin/commit - just provide markReady
+          },
+        },
+        onInsert: async () => {},
+        onUpdate: async () => {},
+        onDelete: async () => {},
+      })
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ persons: collection })
+            .where(({ persons }) => gt(persons.age, 30))
+            .select(({ persons }) => ({
+              id: persons.id,
+              name: persons.name,
+            })),
+        )
+      })
+
+      // Initially isLoading should be true
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.isReady).toBe(false)
+      expect(result.current.state.size).toBe(0)
+      expect(result.current.data).toEqual([])
+
+      // Start sync manually
+      act(() => {
+        collection.preload()
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      // Still loading
+      expect(result.current.isLoading).toBe(true)
+      expect(result.current.isReady).toBe(false)
+
+      // Mark ready without any data commits
+      act(() => {
+        syncMarkReady!()
+      })
+
+      // Should now be ready, even with no data
+      await waitFor(() => {
+        expect(result.current.isReady).toBe(true)
+      })
+      expect(result.current.isLoading).toBe(false)
+      expect(result.current.state.size).toBe(0) // Still no data
+      expect(result.current.data).toEqual([]) // Empty array
+      expect(result.current.status).toBe(`ready`)
+    })
+  })
+
   describe(`callback variants with conditional returns`, () => {
     it(`should handle callback returning undefined with proper state`, async () => {
       const collection = createCollection(
@@ -1453,7 +1982,7 @@ describe(`Query Collections`, () => {
           id: `undefined-callback-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       const { result, rerender } = renderHook(
@@ -1470,10 +1999,10 @@ describe(`Query Collections`, () => {
                   age: persons.age,
                 }))
             },
-            [enabled]
+            [enabled],
           )
         },
-        { initialProps: { enabled: false } }
+        { initialProps: { enabled: false } },
       )
 
       // When callback returns undefined, should return the specified state
@@ -1482,7 +2011,7 @@ describe(`Query Collections`, () => {
       expect(result.current.collection).toBeUndefined()
       expect(result.current.status).toBe(`disabled`)
       expect(result.current.isLoading).toBe(false)
-      expect(result.current.isReady).toBe(false)
+      expect(result.current.isReady).toBe(true)
       expect(result.current.isIdle).toBe(false)
       expect(result.current.isError).toBe(false)
       expect(result.current.isCleanedUp).toBe(false)
@@ -1521,7 +2050,7 @@ describe(`Query Collections`, () => {
       expect(result.current.collection).toBeUndefined()
       expect(result.current.status).toBe(`disabled`)
       expect(result.current.isLoading).toBe(false)
-      expect(result.current.isReady).toBe(false)
+      expect(result.current.isReady).toBe(true)
       expect(result.current.isIdle).toBe(false)
       expect(result.current.isError).toBe(false)
       expect(result.current.isCleanedUp).toBe(false)
@@ -1533,7 +2062,7 @@ describe(`Query Collections`, () => {
           id: `null-callback-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       const { result, rerender } = renderHook(
@@ -1550,10 +2079,10 @@ describe(`Query Collections`, () => {
                   age: persons.age,
                 }))
             },
-            [enabled]
+            [enabled],
           )
         },
-        { initialProps: { enabled: false } }
+        { initialProps: { enabled: false } },
       )
 
       // When callback returns null, should return the specified state
@@ -1562,7 +2091,7 @@ describe(`Query Collections`, () => {
       expect(result.current.collection).toBeUndefined()
       expect(result.current.status).toBe(`disabled`)
       expect(result.current.isLoading).toBe(false)
-      expect(result.current.isReady).toBe(false)
+      expect(result.current.isReady).toBe(true)
       expect(result.current.isIdle).toBe(false)
       expect(result.current.isError).toBe(false)
       expect(result.current.isCleanedUp).toBe(false)
@@ -1590,7 +2119,7 @@ describe(`Query Collections`, () => {
           id: `config-callback-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       const { result, rerender } = renderHook(
@@ -1621,10 +2150,10 @@ describe(`Query Collections`, () => {
                 }))
                 .orderBy(({ persons }) => persons.age)
             },
-            [useConfig]
+            [useConfig],
           )
         },
-        { initialProps: { useConfig: false } }
+        { initialProps: { useConfig: false } },
       )
 
       // Wait for collection to sync and state to update
@@ -1676,7 +2205,7 @@ describe(`Query Collections`, () => {
           id: `collection-callback-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       // Create a live query collection beforehand
@@ -1709,10 +2238,10 @@ describe(`Query Collections`, () => {
                   age: persons.age,
                 }))
             },
-            [useCollection]
+            [useCollection],
           )
         },
-        { initialProps: { useCollection: false } }
+        { initialProps: { useCollection: false } },
       )
 
       // Wait for collection to sync and state to update
@@ -1723,16 +2252,17 @@ describe(`Query Collections`, () => {
       expect(result.current.collection).toBeDefined()
       expect(result.current.status).toBeDefined()
 
+      // Results are in deterministic key order (id: 1 before id: 2)
       expect(result.current.data).toMatchObject([
-        {
-          id: `2`,
-          name: `Jane Doe`,
-          age: 25,
-        },
         {
           id: `1`,
           name: `John Doe`,
           age: 30,
+        },
+        {
+          id: `2`,
+          name: `Jane Doe`,
+          age: 25,
         },
       ])
 
@@ -1765,7 +2295,7 @@ describe(`Query Collections`, () => {
           id: `conditional-deps-test`,
           getKey: (person: Person) => person.id,
           initialData: initialPersons,
-        })
+        }),
       )
 
       const { result, rerender } = renderHook(
@@ -1782,10 +2312,10 @@ describe(`Query Collections`, () => {
                   age: persons.age,
                 }))
             },
-            [minAge, enabled]
+            [minAge, enabled],
           )
         },
-        { initialProps: { minAge: 30, enabled: false } }
+        { initialProps: { minAge: 30, enabled: false } },
       )
 
       // Initially disabled
@@ -1824,6 +2354,254 @@ describe(`Query Collections`, () => {
       expect(result.current.data).toBeUndefined()
       expect(result.current.status).toBe(`disabled`)
       expect(result.current.isEnabled).toBe(false)
+    })
+  })
+
+  describe(`aggregates nested inside expressions`, () => {
+    it(`coalesce(count(...), 0) in groupBy select returns count per group`, async () => {
+      const collection = createCollection(
+        mockSyncCollectionOptions<Person>({
+          id: `nested-agg-test`,
+          getKey: (person: Person) => person.id,
+          initialData: initialPersons,
+        }),
+      )
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ persons: collection })
+            .groupBy(({ persons }) => persons.team)
+            .select(({ persons }) => ({
+              team: persons.team,
+              memberCount: coalesce(count(persons.id), 0),
+            })),
+        )
+      })
+
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(2) // team1 and team2
+      })
+
+      const results = result.current.data
+      expect(
+        stripVirtualProps(results.find((r) => r.team === `team1`)),
+      ).toEqual({
+        team: `team1`,
+        memberCount: 2, // John Doe + John Smith
+      })
+      expect(
+        stripVirtualProps(results.find((r) => r.team === `team2`)),
+      ).toEqual({
+        team: `team2`,
+        memberCount: 1, // Jane Doe
+      })
+    })
+
+    it(`subquery with coalesce(count(...)) can be left-joined as a source`, async () => {
+      const personCollection = createCollection(
+        mockSyncCollectionOptions<Person>({
+          id: `nested-agg-join-persons`,
+          getKey: (person: Person) => person.id,
+          initialData: initialPersons,
+        }),
+      )
+
+      const issueCollection = createCollection(
+        mockSyncCollectionOptions<Issue>({
+          id: `nested-agg-join-issues`,
+          getKey: (issue: Issue) => issue.id,
+          initialData: initialIssues,
+        }),
+      )
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) => {
+          const issueCountSubquery = q
+            .from({ issues: issueCollection })
+            .groupBy(({ issues }) => issues.userId)
+            .select(({ issues }) => ({
+              userId: issues.userId,
+              issueCount: coalesce(count(issues.id), 0),
+            }))
+
+          return q
+            .from({ persons: personCollection })
+            .leftJoin({ ic: issueCountSubquery }, ({ persons, ic }) =>
+              eq(persons.id, ic.userId),
+            )
+            .select(({ persons, ic }) => ({
+              name: persons.name,
+              issueCount: ic.issueCount,
+            }))
+        }, [])
+      })
+
+      await waitFor(() => {
+        expect(result.current.state.size).toBeGreaterThan(0)
+      })
+
+      const results = result.current.data
+      expect(
+        stripVirtualProps(results.find((r) => r.name === `John Doe`)),
+      ).toEqual({
+        name: `John Doe`,
+        issueCount: 2, // Issues 1 and 3
+      })
+      expect(
+        stripVirtualProps(results.find((r) => r.name === `Jane Doe`)),
+      ).toEqual({
+        name: `Jane Doe`,
+        issueCount: 1, // Issue 2
+      })
+    })
+
+    it(`coalesce(sum(...), 0) in groupBy select returns sum per group`, async () => {
+      const collection = createCollection(
+        mockSyncCollectionOptions<Person>({
+          id: `nested-agg-sum-test`,
+          getKey: (person: Person) => person.id,
+          initialData: initialPersons,
+        }),
+      )
+
+      const { result } = renderHook(() => {
+        return useLiveQuery((q) =>
+          q
+            .from({ persons: collection })
+            .groupBy(({ persons }) => persons.team)
+            .select(({ persons }) => ({
+              team: persons.team,
+              totalAge: coalesce(sum(persons.age), 0),
+            })),
+        )
+      })
+
+      await waitFor(() => {
+        expect(result.current.state.size).toBe(2)
+      })
+
+      const results = result.current.data
+      expect(
+        stripVirtualProps(results.find((r) => r.team === `team1`)),
+      ).toEqual({
+        team: `team1`,
+        totalAge: 65, // 30 + 35
+      })
+      expect(
+        stripVirtualProps(results.find((r) => r.team === `team2`)),
+      ).toEqual({
+        team: `team2`,
+        totalAge: 25,
+      })
+    })
+  })
+
+  describe(`includes subqueries`, () => {
+    type Project = {
+      id: string
+      name: string
+    }
+
+    type ProjectIssue = {
+      id: string
+      title: string
+      projectId: string
+    }
+
+    const sampleProjects: Array<Project> = [
+      { id: `p1`, name: `Alpha` },
+      { id: `p2`, name: `Beta` },
+    ]
+
+    const sampleProjectIssues: Array<ProjectIssue> = [
+      { id: `i1`, title: `Bug in Alpha`, projectId: `p1` },
+      { id: `i2`, title: `Feature for Alpha`, projectId: `p1` },
+      { id: `i3`, title: `Bug in Beta`, projectId: `p2` },
+    ]
+
+    it(`should render includes results and reactively update child collections`, async () => {
+      const projectsCollection = createCollection(
+        mockSyncCollectionOptions<Project>({
+          id: `includes-react-projects`,
+          getKey: (p) => p.id,
+          initialData: sampleProjects,
+        }),
+      )
+
+      const issuesCollection = createCollection(
+        mockSyncCollectionOptions<ProjectIssue>({
+          id: `includes-react-issues`,
+          getKey: (i) => i.id,
+          initialData: sampleProjectIssues,
+        }),
+      )
+
+      // Parent hook: runs includes query that produces child Collections
+      const { result: parentResult } = renderHook(() =>
+        useLiveQuery((q) =>
+          q.from({ p: projectsCollection }).select(({ p }) => ({
+            id: p.id,
+            name: p.name,
+            issues: q
+              .from({ i: issuesCollection })
+              .where(({ i }) => eq(i.projectId, p.id))
+              .select(({ i }) => ({
+                id: i.id,
+                title: i.title,
+              })),
+          })),
+        ),
+      )
+
+      // Wait for parent to be ready
+      await waitFor(() => {
+        expect(parentResult.current.data).toHaveLength(2)
+      })
+
+      const alphaProject = parentResult.current.data.find(
+        (p: any) => p.id === `p1`,
+      )!
+      expect(alphaProject.name).toBe(`Alpha`)
+
+      // Child hook: subscribes to the child Collection from the parent row,
+      // simulating a subcomponent using useLiveQuery(project.issues)
+      const { result: childResult } = renderHook(() =>
+        useLiveQuery((alphaProject as any).issues),
+      )
+
+      await waitFor(() => {
+        expect(childResult.current.data).toHaveLength(2)
+      })
+
+      expect(childResult.current.data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: `i1`, title: `Bug in Alpha` }),
+          expect.objectContaining({ id: `i2`, title: `Feature for Alpha` }),
+        ]),
+      )
+
+      // Add a new issue to Alpha — the child hook should reactively update
+      act(() => {
+        issuesCollection.utils.begin()
+        issuesCollection.utils.write({
+          type: `insert`,
+          value: { id: `i4`, title: `New Alpha issue`, projectId: `p1` },
+        })
+        issuesCollection.utils.commit()
+      })
+
+      await waitFor(() => {
+        expect(childResult.current.data).toHaveLength(3)
+      })
+
+      expect(childResult.current.data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: `i1`, title: `Bug in Alpha` }),
+          expect.objectContaining({ id: `i2`, title: `Feature for Alpha` }),
+          expect.objectContaining({ id: `i4`, title: `New Alpha issue` }),
+        ]),
+      )
     })
   })
 })

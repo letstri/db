@@ -5,29 +5,33 @@ import {
   lastOfArray,
   prepareQuery,
   rxStorageWriteErrorToRxError,
-} from "rxdb/plugins/core"
-import DebugModule from "debug"
-import { stripRxdbFields } from "./helper"
+} from 'rxdb/plugins/core'
+import DebugModule from 'debug'
+import { stripRxdbFields } from './helper'
 import type {
   FilledMangoQuery,
   RxCollection,
   RxDocumentData,
-} from "rxdb/plugins/core"
+} from 'rxdb/plugins/core'
+import type { Subscription } from 'rxjs'
 
 import type {
   BaseCollectionConfig,
   CollectionConfig,
   InferSchemaOutput,
   SyncConfig,
-} from "@tanstack/db"
-import type { StandardSchemaV1 } from "@standard-schema/spec"
+} from '@tanstack/db'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 const debug = DebugModule.debug(`ts/db:rxdb`)
 
 /**
  * Used in tests to ensure proper cleanup
  */
-export const OPEN_RXDB_SUBSCRIPTIONS = new WeakMap<RxCollection, Set<any>>()
+export const OPEN_RXDB_SUBSCRIPTIONS = new WeakMap<
+  RxCollection,
+  Set<Subscription>
+>()
 
 /**
  * Configuration interface for RxDB collection options
@@ -83,7 +87,7 @@ export type RxDBCollectionConfig<
 
 // Overload for when schema is provided
 export function rxdbCollectionOptions<T extends StandardSchemaV1>(
-  config: RxDBCollectionConfig<InferSchemaOutput<T>, T>
+  config: RxDBCollectionConfig<InferSchemaOutput<T>, T>,
 ): CollectionConfig<InferSchemaOutput<T>, string, T> & {
   schema: T
 }
@@ -92,7 +96,7 @@ export function rxdbCollectionOptions<T extends StandardSchemaV1>(
 export function rxdbCollectionOptions<T extends object>(
   config: RxDBCollectionConfig<T> & {
     schema?: never // prohibit schema
-  }
+  },
 ): CollectionConfig<T, string> & {
   schema?: never // no schema in the result
 }
@@ -106,7 +110,7 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
 
   // "getKey"
   const primaryPath = rxCollection.schema.primaryPath
-  function getKey(item: any): string {
+  function getKey(item: Record<string, unknown>): string {
     const key: string = item[primaryPath] as string
     return key
   }
@@ -139,23 +143,24 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
             query = {
               selector: {
                 $or: [
-                  { "_meta.lwt": { $gt: cursor._meta.lwt } },
+                  { '_meta.lwt': { $gt: cursor._meta.lwt } },
                   {
-                    "_meta.lwt": cursor._meta.lwt,
+                    '_meta.lwt': cursor._meta.lwt,
                     [primaryPath]: {
                       $gt: getKey(cursor),
                     },
                   },
                 ],
-              } as any,
-              sort: [{ "_meta.lwt": `asc` }, { [primaryPath]: `asc` } as any],
+                _deleted: false,
+              },
+              sort: [{ '_meta.lwt': `asc` }, { [primaryPath]: `asc` }],
               limit: syncBatchSize,
               skip: 0,
             }
           } else {
             query = {
-              selector: {},
-              sort: [{ "_meta.lwt": `asc` }, { [primaryPath]: `asc` } as any],
+              selector: { _deleted: false },
+              sort: [{ '_meta.lwt': `asc` }, { [primaryPath]: `asc` }],
               limit: syncBatchSize,
               skip: 0,
             }
@@ -169,7 +174,7 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
            */
           const preparedQuery = prepareQuery<Row>(
             rxCollection.storageInstance.schema,
-            query
+            query,
           )
           const result = await rxCollection.storageInstance.query(preparedQuery)
           const docs = result.documents
@@ -198,11 +203,11 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
           return
         }
         begin()
-        write(msg as any)
+        write(msg)
         commit()
       }
 
-      let sub: any
+      let sub: Subscription
       function startOngoingFetch() {
         // Subscribe early and buffer live changes during initial load and ongoing
         sub = rxCollection.$.subscribe((ev) => {
@@ -223,7 +228,7 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
         const subs = getFromMapOrCreate(
           OPEN_RXDB_SUBSCRIPTIONS,
           rxCollection,
-          () => new Set()
+          () => new Set(),
         )
         subs.add(sub)
       }
@@ -234,7 +239,7 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
 
         if (buffer.length) {
           begin()
-          for (const msg of buffer) write(msg as any)
+          for (const msg of buffer) write(msg)
           commit()
           buffer.length = 0
         }
@@ -248,7 +253,7 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
         const subs = getFromMapOrCreate(
           OPEN_RXDB_SUBSCRIPTIONS,
           rxCollection,
-          () => new Set()
+          () => new Set(),
         )
         subs.delete(sub)
         sub.unsubscribe()
@@ -258,14 +263,14 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
     getSyncMetadata: undefined,
   }
 
-  const collectionConfig: CollectionConfig<Row, string, any> = {
+  const collectionConfig: CollectionConfig<Row, string> = {
     ...restConfig,
-    getKey: getKey as any,
+    getKey,
     sync,
     onInsert: async (params) => {
       debug(`insert`, params)
       const newItems = params.transaction.mutations.map((m) => m.modified)
-      return rxCollection.bulkUpsert(newItems as Array<any>).then((result) => {
+      return rxCollection.bulkUpsert(newItems).then((result) => {
         if (result.error.length > 0) {
           throw rxStorageWriteErrorToRxError(ensureNotFalsy(result.error[0]))
         }
@@ -275,7 +280,8 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
     onUpdate: async (params) => {
       debug(`update`, params)
       const mutations = params.transaction.mutations.filter(
-        (m) => m.type === `update`
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        (m) => m.type === `update`,
       )
 
       for (const mutation of mutations) {
@@ -285,15 +291,16 @@ export function rxdbCollectionOptions(config: RxDBCollectionConfig<any, any>) {
         if (!doc) {
           continue
         }
-        await doc.incrementalPatch(newValue as any)
+        await doc.incrementalPatch(newValue)
       }
     },
     onDelete: async (params) => {
       debug(`delete`, params)
       const mutations = params.transaction.mutations.filter(
-        (m) => m.type === `delete`
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        (m) => m.type === `delete`,
       )
-      const ids = mutations.map((mutation: any) => getKey(mutation.original))
+      const ids = mutations.map((mutation) => getKey(mutation.original))
       return rxCollection.bulkRemove(ids).then((result) => {
         if (result.error.length > 0) {
           throw result.error

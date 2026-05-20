@@ -2,8 +2,8 @@ import {
   DefaultMap,
   chunkedArrayPush,
   globalObjectIdGenerator,
-} from "./utils.js"
-import { hash } from "./hashing/index.js"
+} from './utils.js'
+import { hash } from './hashing/index.js'
 
 export type MultiSetArray<T> = Array<[T, number]>
 export type KeyedData<T> = [key: string, value: T]
@@ -35,7 +35,7 @@ export class MultiSet<T> {
    */
   map<U>(f: (data: T) => U): MultiSet<U> {
     return new MultiSet(
-      this.#inner.map(([data, multiplicity]) => [f(data), multiplicity])
+      this.#inner.map(([data, multiplicity]) => [f(data), multiplicity]),
     )
   }
 
@@ -51,7 +51,7 @@ export class MultiSet<T> {
    */
   negate(): MultiSet<T> {
     return new MultiSet(
-      this.#inner.map(([data, multiplicity]) => [data, -multiplicity])
+      this.#inner.map(([data, multiplicity]) => [data, -multiplicity]),
     )
   }
 
@@ -142,7 +142,7 @@ export class MultiSet<T> {
       const compositeKey = key + `|` + valueId
       consolidated.set(
         compositeKey,
-        (consolidated.get(compositeKey) || 0) + multiplicity
+        (consolidated.get(compositeKey) || 0) + multiplicity,
       )
 
       // Store the original data for the first occurrence
@@ -207,6 +207,12 @@ export class MultiSet<T> {
   extend(other: MultiSet<T> | MultiSetArray<T>): void {
     const otherArray = other instanceof MultiSet ? other.getInner() : other
     chunkedArrayPush(this.#inner, otherArray)
+  }
+
+  add(item: T, multiplicity: number): void {
+    if (multiplicity !== 0) {
+      this.#inner.push([item, multiplicity])
+    }
   }
 
   getInner(): MultiSetArray<T> {

@@ -1,18 +1,20 @@
-import { createDeferred } from "./deferred"
+import { createDeferred } from './deferred'
+import './duplicate-instance-check'
 import {
   MissingMutationFunctionError,
   TransactionAlreadyCompletedRollbackError,
   TransactionNotPendingCommitError,
   TransactionNotPendingMutateError,
-} from "./errors"
-import type { Deferred } from "./deferred"
+} from './errors'
+import { transactionScopedScheduler } from './scheduler.js'
+import type { Deferred } from './deferred'
 import type {
   MutationFn,
   PendingMutation,
   TransactionConfig,
   TransactionState,
   TransactionWithMutations,
-} from "./types"
+} from './types'
 
 const transactions: Array<Transaction<any>> = []
 let transactionStack: Array<Transaction<any>> = []
@@ -39,7 +41,7 @@ let sequenceNumber = 0
  */
 function mergePendingMutations<T extends object>(
   existing: PendingMutation<T>,
-  incoming: PendingMutation<T>
+  incoming: PendingMutation<T>,
 ): PendingMutation<T> | null {
   // Truth table implementation
   switch (`${existing.type}-${incoming.type}` as const) {
@@ -152,7 +154,7 @@ function mergePendingMutations<T extends object>(
  * await tx.commit()
  */
 export function createTransaction<T extends object = Record<string, unknown>>(
-  config: TransactionConfig<T>
+  config: TransactionConfig<T>,
 ): Transaction<T> {
   const newTransaction = new Transaction<T>(config)
   transactions.push(newTransaction)
@@ -179,11 +181,21 @@ export function getActiveTransaction(): Transaction | undefined {
 }
 
 function registerTransaction(tx: Transaction<any>) {
+  // Clear any stale work that may have been left behind if a previous mutate
+  // scope aborted before we could flush.
+  transactionScopedScheduler.clear(tx.id)
   transactionStack.push(tx)
 }
 
 function unregisterTransaction(tx: Transaction<any>) {
-  transactionStack = transactionStack.filter((t) => t.id !== tx.id)
+  // Always flush pending work for this transaction before removing it from
+  // the ambient stack – this runs even if the mutate callback throws.
+  // If flush throws (e.g., due to a job error), we still clean up the stack.
+  try {
+    transactionScopedScheduler.flush(tx.id)
+  } finally {
+    transactionStack = transactionStack.filter((t) => t.id !== tx.id)
+  }
 }
 
 function removeFromPendingList(tx: Transaction<any>) {
@@ -233,7 +245,12 @@ class Transaction<T extends object = Record<string, unknown>> {
 
   /**
    * Execute collection operations within this transaction
-   * @param callback - Function containing collection operations to group together
+   * @param callback - Synchronous function containing collection operations to group together.
+   * The transaction context is active only for the synchronous duration of this callback.
+   * Async work should happen in `mutationFn`; collection operations after `await` boundaries
+   * inside this callback will not be part of this transaction. For manual transactions, call
+   * `mutate` multiple times before committing to add more synchronous operations to the same
+   * transaction.
    * @returns This transaction for chaining
    * @example
    * // Group multiple operations
@@ -267,6 +284,11 @@ class Transaction<T extends object = Record<string, unknown>> {
    *   collection.insert({ id: "1", text: "Item" })
    * })
    *
+   * // Add more synchronous mutations to the same transaction
+   * tx.mutate(() => {
+   *   collection.update("1", draft => { draft.text = "Updated item" })
+   * })
+   *
    * // Commit later when ready
    * await tx.commit()
    */
@@ -276,6 +298,7 @@ class Transaction<T extends object = Record<string, unknown>> {
     }
 
     registerTransaction(this)
+
     try {
       callback()
     } finally {
@@ -312,7 +335,7 @@ class Transaction<T extends object = Record<string, unknown>> {
   applyMutations(mutations: Array<PendingMutation<any>>): void {
     for (const newMutation of mutations) {
       const existingIndex = this.mutations.findIndex(
-        (m) => m.globalKey === newMutation.globalKey
+        (m) => m.globalKey === newMutation.globalKey,
       )
 
       if (existingIndex >= 0) {

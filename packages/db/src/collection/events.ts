@@ -1,5 +1,7 @@
-import type { Collection } from "./index.js"
-import type { CollectionStatus } from "../types.js"
+import { EventEmitter } from '../event-emitter.js'
+import type { Collection } from './index.js'
+import type { CollectionStatus } from '../types.js'
+import type { BasicExpression } from '../query/ir.js'
 
 /**
  * Event emitted when the collection status changes
@@ -31,9 +33,76 @@ export interface CollectionSubscribersChangeEvent {
   subscriberCount: number
 }
 
+/**
+ * Event emitted when the collection's loading more state changes
+ */
+export interface CollectionLoadingSubsetChangeEvent {
+  type: `loadingSubset:change`
+  collection: Collection<any, any, any, any, any>
+  isLoadingSubset: boolean
+  previousIsLoadingSubset: boolean
+  loadingSubsetTransition: `start` | `end`
+}
+
+/**
+ * Event emitted when the collection is truncated (all data cleared)
+ */
+export interface CollectionTruncateEvent {
+  type: `truncate`
+  collection: Collection<any, any, any, any, any>
+}
+
+export type CollectionIndexSerializableValue =
+  | string
+  | number
+  | boolean
+  | null
+  | Array<CollectionIndexSerializableValue>
+  | {
+      [key: string]: CollectionIndexSerializableValue
+    }
+
+export interface CollectionIndexResolverMetadata {
+  kind: `constructor` | `async`
+  name?: string
+}
+
+export interface CollectionIndexMetadata {
+  /**
+   * Version for the signature serialization contract.
+   */
+  signatureVersion: 1
+  /**
+   * Stable signature derived from expression + serializable options.
+   * Non-serializable option fields are intentionally omitted.
+   */
+  signature: string
+  indexId: number
+  name?: string
+  expression: BasicExpression
+  resolver: CollectionIndexResolverMetadata
+  options?: CollectionIndexSerializableValue
+}
+
+export interface CollectionIndexAddedEvent {
+  type: `index:added`
+  collection: Collection<any, any, any, any, any>
+  index: CollectionIndexMetadata
+}
+
+export interface CollectionIndexRemovedEvent {
+  type: `index:removed`
+  collection: Collection<any, any, any, any, any>
+  index: CollectionIndexMetadata
+}
+
 export type AllCollectionEvents = {
-  "status:change": CollectionStatusChangeEvent
-  "subscribers:change": CollectionSubscribersChangeEvent
+  'status:change': CollectionStatusChangeEvent
+  'subscribers:change': CollectionSubscribersChangeEvent
+  'loadingSubset:change': CollectionLoadingSubsetChangeEvent
+  truncate: CollectionTruncateEvent
+  'index:added': CollectionIndexAddedEvent
+  'index:removed': CollectionIndexRemovedEvent
 } & {
   [K in CollectionStatus as `status:${K}`]: CollectionStatusEvent<K>
 }
@@ -42,99 +111,40 @@ export type CollectionEvent =
   | AllCollectionEvents[keyof AllCollectionEvents]
   | CollectionStatusChangeEvent
   | CollectionSubscribersChangeEvent
+  | CollectionLoadingSubsetChangeEvent
+  | CollectionTruncateEvent
+  | CollectionIndexAddedEvent
+  | CollectionIndexRemovedEvent
 
 export type CollectionEventHandler<T extends keyof AllCollectionEvents> = (
-  event: AllCollectionEvents[T]
+  event: AllCollectionEvents[T],
 ) => void
 
-export class CollectionEventsManager {
+export class CollectionEventsManager extends EventEmitter<AllCollectionEvents> {
   private collection!: Collection<any, any, any, any, any>
-  private listeners = new Map<
-    keyof AllCollectionEvents,
-    Set<CollectionEventHandler<any>>
-  >()
 
-  constructor() {}
+  constructor() {
+    super()
+  }
 
   setDeps(deps: { collection: Collection<any, any, any, any, any> }) {
     this.collection = deps.collection
   }
 
-  on<T extends keyof AllCollectionEvents>(
-    event: T,
-    callback: CollectionEventHandler<T>
-  ) {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, new Set())
-    }
-    this.listeners.get(event)!.add(callback)
-
-    return () => {
-      this.listeners.get(event)?.delete(callback)
-    }
-  }
-
-  once<T extends keyof AllCollectionEvents>(
-    event: T,
-    callback: CollectionEventHandler<T>
-  ) {
-    const unsubscribe = this.on(event, (eventPayload) => {
-      callback(eventPayload)
-      unsubscribe()
-    })
-    return unsubscribe
-  }
-
-  off<T extends keyof AllCollectionEvents>(
-    event: T,
-    callback: CollectionEventHandler<T>
-  ) {
-    this.listeners.get(event)?.delete(callback)
-  }
-
-  waitFor<T extends keyof AllCollectionEvents>(
-    event: T,
-    timeout?: number
-  ): Promise<AllCollectionEvents[T]> {
-    return new Promise((resolve, reject) => {
-      let timeoutId: NodeJS.Timeout | undefined
-      const unsubscribe = this.on(event, (eventPayload) => {
-        if (timeoutId) {
-          clearTimeout(timeoutId)
-          timeoutId = undefined
-        }
-        resolve(eventPayload)
-        unsubscribe()
-      })
-      if (timeout) {
-        timeoutId = setTimeout(() => {
-          timeoutId = undefined
-          unsubscribe()
-          reject(new Error(`Timeout waiting for event ${event}`))
-        }, timeout)
-      }
-    })
-  }
-
+  /**
+   * Emit an event to all listeners
+   * Public API for emitting collection events
+   */
   emit<T extends keyof AllCollectionEvents>(
     event: T,
-    eventPayload: AllCollectionEvents[T]
-  ) {
-    this.listeners.get(event)?.forEach((listener) => {
-      try {
-        listener(eventPayload)
-      } catch (error) {
-        // Re-throw in a microtask to surface the error
-        queueMicrotask(() => {
-          throw error
-        })
-      }
-    })
+    eventPayload: AllCollectionEvents[T],
+  ): void {
+    this.emitInner(event, eventPayload)
   }
 
   emitStatusChange<T extends CollectionStatus>(
     status: T,
-    previousStatus: CollectionStatus
+    previousStatus: CollectionStatus,
   ) {
     this.emit(`status:change`, {
       type: `status:change`,
@@ -155,7 +165,7 @@ export class CollectionEventsManager {
 
   emitSubscribersChange(
     subscriberCount: number,
-    previousSubscriberCount: number
+    previousSubscriberCount: number,
   ) {
     this.emit(`subscribers:change`, {
       type: `subscribers:change`,
@@ -165,7 +175,23 @@ export class CollectionEventsManager {
     })
   }
 
+  emitIndexAdded(index: CollectionIndexMetadata) {
+    this.emit(`index:added`, {
+      type: `index:added`,
+      collection: this.collection,
+      index,
+    })
+  }
+
+  emitIndexRemoved(index: CollectionIndexMetadata) {
+    this.emit(`index:removed`, {
+      type: `index:removed`,
+      collection: this.collection,
+      index,
+    })
+  }
+
   cleanup() {
-    this.listeners.clear()
+    this.clearListeners()
   }
 }
